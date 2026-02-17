@@ -17,7 +17,7 @@ ToBeProcessed/
 └── Owners.csv        ← County parcel owner export (CSV or XLSX)
 ```
 
-All three accept **CSV or XLSX** format. Column names are auto-detected — see the tables below. If your file uses a name not listed, either rename the column in your file or add the variant to the `_*_CANDIDATES` list in the relevant formatter script.
+All three accept **CSV or XLSX** format. Column names are auto-detected — see the tables below. If your file uses a name not listed, rename the column in your file to match one of the accepted names before running the pipeline.
 
 ---
 
@@ -371,7 +371,7 @@ python run_pipeline.py --consumer MyFile.csv --business Biz.xlsx --parcel Parcel
 
 ### Blank addresses in the output
 
-Your input file uses a column name not in the candidates list. Open the relevant formatter script (`scripts/consumer_formatter.py`, `scripts/business_formatter.py`, or `scripts/address_processor.py`) and add your column name to the appropriate `_*_CANDIDATES` list.
+Your input file uses a column name not in the accepted list. Rename the column in your source file to match one of the names shown in the Input Files tables above, then re-run the pipeline.
 
 ### Garbled name in the output
 

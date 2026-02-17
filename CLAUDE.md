@@ -418,11 +418,14 @@ All constants in `utils/config.py`:
 
 ### Adding a new input column name variant
 
-If a source file uses a column name not in the candidates list:
+Users should always rename their source columns to match the accepted names documented in README.md — they should not need to touch the code.
+
+If a genuinely new source format needs to be permanently supported (e.g., a new data vendor is onboarded), a maintainer can add its column names to the candidates lists:
 1. Open the relevant formatter (`scripts/consumer_formatter.py`, `scripts/business_formatter.py`, or `scripts/address_processor.py`)
 2. Find the appropriate `_*_CANDIDATES` list
 3. Add the new column name as the first entry (highest priority)
-4. Run full pipeline to verify addresses are now populated
+4. Update the accepted column names table in README.md
+5. Run full pipeline to verify addresses are now populated
 
 ### Debugging a false positive merge
 
@@ -450,8 +453,8 @@ If a source file uses a column name not in the candidates list:
 
 1. Run the pipeline and check `output/consumer_formatted.csv` or `output/business_formatted.csv`
 2. If addresses are blank, the source file uses a column name not in the candidates list
-3. Open the source file and find the actual column name
-4. Add it to the appropriate `_*_CANDIDATES` list in the formatter script
+3. The fix for the **user** is to rename the column in their source file to match one of the accepted names in README.md
+4. The fix for a **maintainer** (if a new data vendor needs permanent support) is to add the column name to the appropriate `_*_CANDIDATES` list and update README.md
 5. **Data Axle Business note:** Data Axle puts street address in `Address Line 2`, not `Street Address`. This is already handled — if you see blank business addresses, verify the source file actually has `Address Line 2` column.
 
 ---

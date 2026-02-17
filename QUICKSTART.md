@@ -4,6 +4,24 @@
 
 ---
 
+## Step 0 — Get the Code
+
+**Clone with Git:**
+```bash
+git clone https://github.com/lucasmcoleman/MailFormatter.git
+cd MailFormatter
+```
+
+**Download ZIP** (no Git required):
+1. Click the green **Code** button on the [GitHub page](https://github.com/lucasmcoleman/MailFormatter)
+2. Select **Download ZIP**
+3. Extract and open the `MailFormatter/` folder
+
+**Download a Release:**
+Go to [Releases](https://github.com/lucasmcoleman/MailFormatter/releases) and download the latest stable ZIP.
+
+---
+
 ## Step 1 — Install Dependencies
 
 Requires Python 3.8+.

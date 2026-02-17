@@ -6,6 +6,31 @@ Consolidates Consumer, Business, and Parcel (property owner) records from overla
 
 ---
 
+## Getting Started
+
+### Option 1 — Clone with Git
+
+```bash
+git clone https://github.com/lucasmcoleman/MailFormatter.git
+cd MailFormatter
+```
+
+### Option 2 — Download ZIP
+
+1. Click the green **Code** button at the top of this page
+2. Select **Download ZIP**
+3. Extract the ZIP and open the `MailFormatter/` folder
+
+### Option 3 — Download a Release
+
+Go to the [Releases](https://github.com/lucasmcoleman/MailFormatter/releases) page and download the latest release ZIP. Releases are stable, tested snapshots — recommended if you are not using Git.
+
+---
+
+Once you have the folder, follow [QUICKSTART.md](QUICKSTART.md) to install dependencies, place your data files, and run the pipeline.
+
+---
+
 ## Input Files
 
 Place all three files in the `ToBeProcessed/` folder before running:

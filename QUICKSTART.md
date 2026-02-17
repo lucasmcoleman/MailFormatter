@@ -140,8 +140,7 @@ python -m scripts.consolidate_addresses
 → Run `pytest tests/ -v` for detailed failure output.
 
 **Blank addresses in output**
-→ Check that your input files use column names listed in the README.
-→ Add a matching column name to the `_*_CANDIDATES` list in the relevant formatter script.
+→ Rename the column in your source file to match one of the accepted names in the README → Input Files section, then re-run.
 
 **Low consolidation rate**
 → May be expected if your three source files cover different geographic areas with minimal overlap.

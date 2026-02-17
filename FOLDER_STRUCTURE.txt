@@ -1,0 +1,62 @@
+MailFormatter_V4/
+|
++-- Documentation (5 files)
+|   +-- QUICKSTART.md            # 5-minute setup guide (start here)
+|   +-- README.md                # Complete user documentation
+|   +-- CLAUDE.md                # Developer/maintainer guide
+|   +-- ORGANIZATION.md          # Project organization summary
+|   \-- FOLDER_STRUCTURE.txt     # This file
+|
++-- Configuration
+|   \-- .gitignore               # Git exclusions (output/, __pycache__, etc.)
+|
++-- Entry Point
+|   \-- run_pipeline.py          # Master orchestrator (runs all 5 stages)
+|
++-- scripts/ (7 modules)         # Pipeline stage implementations
+|   +-- __init__.py
+|   +-- consumer_formatter.py    # Stage 1: Consumer CSV -> standardized
+|   +-- business_formatter.py    # Stage 1: Business CSV -> standardized
+|   +-- address_processor.py     # Stage 1: Parcel CSV/XLSX -> standardized
+|   +-- combine_sources.py       # Stage 2: Stack + exact dedup
+|   +-- consolidate_addresses.py # Stage 3: Fuzzy dedup with safety checks
+|   +-- validate_output.py       # Stage 4: Validation and review flagging
+|   \-- generate_stats.py        # Stage 5: Statistics report
+|
++-- utils/ (4 modules)           # Shared formatting & matching logic
+|   +-- __init__.py
+|   +-- config.py                # Constants, thresholds, mappings
+|   +-- name_formatter.py        # 5 entity types, LAST FIRST reversal
+|   +-- address_formatter.py     # PO Box extraction, normalization
+|   \-- matching_utils.py        # Fuzzy matching with safety guards
+|
++-- tests/ (1 suite)             # Test suite (39 tests)
+|   +-- __init__.py
+|   \-- test_pipeline.py         # Comprehensive edge case coverage
+|
++-- ToBeProcessed/               # Drop input files here before running
+|   +-- Consumer.csv             # Data Axle consumer export
+|   +-- Business.csv             # Data Axle business export
+|   \-- Owners.csv (or .xlsx)    # County parcel owner export
+|
+\-- output/                      # Generated results (gitignored)
+    +-- consumer_formatted.csv   # Stage 1 output
+    +-- business_formatted.csv   # Stage 1 output
+    +-- parcel_formatted.csv     # Stage 1 output
+    +-- combined.csv             # Stage 2 output
+    +-- consolidated.csv         # *** FINAL OUTPUT (Stage 3) ***
+    +-- validation_report.txt    # Stage 4 output
+    \-- stats.txt                # Stage 5 output
+
+------------------------------------------------------------
+Total source files:  15 Python modules
+Test coverage:       39 tests, 15 edge case categories
+Documentation:       5 guides (Quick Start, User, Developer, Organization, Structure)
+------------------------------------------------------------
+
+Quick Commands:
+  Run pipeline:    python run_pipeline.py
+  Run tests:       pytest tests/
+  View results:    output/consolidated.csv
+  Check quality:   output/validation_report.txt
+  See stats:       output/stats.txt

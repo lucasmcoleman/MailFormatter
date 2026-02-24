@@ -1,8 +1,15 @@
 """
 Stage 1 – Parcel / Address Processor
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Format County Parcel Owners source data (XLSX) into the standardized 7-column
-layout defined by OUTPUT_COLUMNS.
+Format County Parcel Owners source data (XLSX) into the standardized output
+layout defined by OUTPUT_COLUMNS (V5 includes split name columns).
+
+V5 changes:
+- Uses ``parse_raw_owner_name`` for structured NameComponents that populate
+  the six split name columns (Primary First/Middle/Last, 2nd Owner First/
+  Middle/Last).
+- Detects and concatenates an optional second address line (OwnerAddr2)
+  with a \" - \" separator (e.g. "24861 Acropolis Dr. - Apt. 207").
 
 Usage:
     python -m scripts.address_processor [--input PATH] [--output PATH]
@@ -29,6 +36,8 @@ from utils.name_formatter import (
     is_trust,
     is_government_entity,
     is_entity,
+    parse_raw_owner_name,
+    NameComponents,
 )
 from utils.address_formatter import format_street_address
 
@@ -100,6 +109,12 @@ _ADDRESS_CANDIDATES = [
     "Address", "ADDRESS", "Street",
 ]
 
+_ADDRESS2_CANDIDATES = [
+    "MAIL_ADDRESS2", "Mailing Address2", "OwnerAddr2", "Owner Address 2",
+    "Street Address 2", "STREET_ADDRESS_2", "Address2", "ADDRESS2",
+    "Address Line 2", "Addr2",
+]
+
 _CITY_CANDIDATES = [
     "MAIL_CITY", "Mailing Address City", "Mailing City", "MAILING_CITY",
     "City", "CITY",
@@ -150,78 +165,17 @@ def _is_routing_line(text: str) -> bool:
     return bool(_ROUTING_LINE_RE.match(text.strip()))
 
 
-def _format_owner_name(raw: str) -> str:
-    """Determine the owner type and apply the appropriate formatter.
+def _parse_owner_name(raw: str) -> NameComponents:
+    """Parse a raw owner name string into NameComponents using V5 logic.
 
-    Household-style names (containing ``/``, ``\\``, or ``&``) are routed
-    through ``extract_individuals_from_household`` which understands shared-
-    surname patterns and slash/ampersand splitting.
+    Delegates to ``parse_raw_owner_name`` from name_formatter which handles
+    all V5 rules: double first names, suffix repositioning, LP normalisation,
+    trust/entity/government detection, and slash-separated households.
     """
     name = raw.strip()
     if not name:
-        return ""
-    # Trust names with slashes need household splitting first, then "Trust" appended.
-    if is_trust(name) and ("/" in name or "\\" in name):
-        return _format_trust_with_slash(name)
-    if is_trust(name):
-        return format_trust_name(name)
-    if is_government_entity(name):
-        return format_government_entity(name)
-    if is_entity(name):
-        return format_entity_name(name)
-    # Household detection: if the name has slash, backslash, or ampersand,
-    # route through household extraction which handles shared surnames.
-    if "/" in name or "\\" in name or "&" in name:
-        individuals = extract_individuals_from_household(name)
-        if individuals:
-            return combine_household_names(individuals)
-    # Simple person: assume LAST FIRST format
-    return format_person_name_from_lastfirst(name)
-
-
-def _format_trust_with_slash(name: str) -> str:
-    """Handle trust names that contain slash-separated co-owners.
-
-    E.g. ``GETZWILLER JOE B/THERESA D TRUST``
-      -> ``Joe B. and Theresa D. Getzwiller Trust``
-    """
-    from utils.config import TRUST_KEYWORDS
-    upper = name.upper()
-
-    # Find and strip the trust keyword to get the people portion
-    trust_suffix = "Trust"
-    people_part = name
-
-    for kw in TRUST_KEYWORDS:
-        pos = upper.find(kw)
-        if pos != -1:
-            before = name[:pos].strip()
-            # Check for qualifiers like FAMILY, LIVING before the keyword
-            tokens_before = before.split()
-            qualifier_words = []
-            while tokens_before and tokens_before[-1].upper() in (
-                'FAMILY', 'FAM', 'LIVING', 'LIV', 'REVOCABLE', 'REV',
-                'IRREVOCABLE', 'IRREV', 'SURVIVOR', 'SURVIVORS',
-            ):
-                qualifier_words.insert(0, tokens_before.pop())
-            people_part = " ".join(tokens_before).strip()
-            qualifier = " ".join(qualifier_words).strip()
-            if qualifier:
-                trust_suffix = f"{qualifier.title()} Trust"
-            break
-
-    if not people_part or "/" not in people_part:
-        return format_trust_name(name)
-
-    # Extract household names from the people portion
-    individuals = extract_individuals_from_household(people_part)
-    if individuals:
-        combined = combine_household_names(individuals)
-        if combined.upper().endswith(" TRUST"):
-            return combined
-        return f"{combined} {trust_suffix}"
-
-    return format_trust_name(name)
+        return NameComponents()
+    return parse_raw_owner_name(name)
 
 
 # =============================================================================
@@ -239,7 +193,12 @@ def _strip_trailing_csz(address: str) -> str:
 # =============================================================================
 
 def format_parcel_data(input_path: str, output_path: str) -> None:
-    """Read a County Parcel Owners file (XLSX or CSV) and write a standardised 7-column CSV.
+    """Read a County Parcel Owners file (XLSX or CSV) and write a formatted CSV.
+
+    V5 changes vs V4:
+    - Uses ``parse_raw_owner_name`` to populate split name columns.
+    - Detects a second address line column (OwnerAddr2) and concatenates it
+      to the primary address with \" - \" separator.
 
     Parameters
     ----------
@@ -254,6 +213,7 @@ def format_parcel_data(input_path: str, output_path: str) -> None:
     owner_col = _safe_get_col(df, _OWNER_CANDIDATES)
     name_line2_col = _safe_get_col(df, _NAME_LINE2_CANDIDATES)
     addr_col = _safe_get_col(df, _ADDRESS_CANDIDATES)
+    addr2_col = _safe_get_col(df, _ADDRESS2_CANDIDATES)   # V5: second address line
     city_col = _safe_get_col(df, _CITY_CANDIDATES)
     state_col = _safe_get_col(df, _STATE_CANDIDATES)
     zip_col = _safe_get_col(df, _ZIP_CANDIDATES)
@@ -277,59 +237,86 @@ def format_parcel_data(input_path: str, output_path: str) -> None:
         parsed_state = parsed.apply(lambda t: t[1])
         parsed_zip = parsed.apply(lambda t: t[2])
 
-    # ---- Owner name + second line ----
-    def _resolve_name_and_second_line(row_idx: int) -> tuple[str, str]:
-        """Return (formatted_name, second_line_value).
+    # ---- Owner name + split components + second line ----
+    # V5: parse_raw_owner_name returns NameComponents with full_name and split fields.
+    def _resolve_name_components(row_idx: int) -> tuple[NameComponents, str]:
+        """Return (NameComponents, second_line_value).
 
         If Name Line 2 starts with a routing prefix (C/O, ATTN, etc.) it is
         kept as the second address line.  Otherwise it is treated as a second
-        owner name and combined with the primary name.
+        owner name whose formatted full_name is combined into the primary NC.
         """
-        # Primary name
         raw_primary = ""
         if owner_col is not None:
             raw_primary = df.at[row_idx, owner_col].strip()
+
         if raw_primary and not _is_null_like(raw_primary):
-            primary_name = _format_owner_name(raw_primary)
+            nc = _parse_owner_name(raw_primary)
         elif parcel_id_col is not None:
             pid = df.at[row_idx, parcel_id_col].strip()
-            primary_name = f"Parcel {pid}" if pid and not _is_null_like(pid) else ""
+            fallback = f"Parcel {pid}" if pid and not _is_null_like(pid) else ""
+            nc = NameComponents(full_name=fallback)
         else:
-            primary_name = ""
+            nc = NameComponents()
 
         # Secondary line
         raw_secondary = ""
         if name_line2_col is not None:
             raw_secondary = df.at[row_idx, name_line2_col].strip()
         if not raw_secondary or _is_null_like(raw_secondary):
-            return primary_name, ""
+            return nc, ""
         if _is_routing_line(raw_secondary):
-            return primary_name, raw_secondary
+            return nc, raw_secondary
 
-        # Treat as a second owner name — format and combine with primary
-        secondary_name = _format_owner_name(raw_secondary)
-        if not secondary_name:
-            return primary_name, raw_secondary  # formatting failed, keep as-is
-        if primary_name:
-            primary_individuals = extract_individuals_from_household(primary_name)
-            secondary_individuals = extract_individuals_from_household(secondary_name)
-            combined = combine_household_names(primary_individuals + secondary_individuals)
-            return combined, ""
-        return secondary_name, ""
+        # Treat as a second owner — combine full_name strings
+        nc2 = _parse_owner_name(raw_secondary)
+        if not nc2.full_name:
+            return nc, raw_secondary
+        if nc.full_name:
+            primary_individuals = extract_individuals_from_household(nc.full_name)
+            secondary_individuals = extract_individuals_from_household(nc2.full_name)
+            combined_full = combine_household_names(
+                primary_individuals + secondary_individuals
+            )
+            nc.full_name = combined_full
+        else:
+            nc = nc2
+        return nc, ""
 
-    name_and_second = [_resolve_name_and_second_line(i) for i in df.index]
-    names = pd.Series([p[0] for p in name_and_second], index=df.index)
-    second_lines = pd.Series([p[1] for p in name_and_second], index=df.index)
+    nc_and_second = [_resolve_name_components(i) for i in df.index]
+    nc_list: list[NameComponents] = [p[0] for p in nc_and_second]
+    second_lines = pd.Series([p[1] for p in nc_and_second], index=df.index)
 
-    # ---- Address ----
-    if addr_col is not None:
-        addresses = df[addr_col].astype(str).apply(
-            lambda v: format_street_address(_strip_trailing_csz(v)) if v.strip() else ""
-        )
+    names = pd.Series([nc.full_name for nc in nc_list], index=df.index)
+    p1_firsts = pd.Series([nc.p1_first for nc in nc_list], index=df.index)
+    p1_middles = pd.Series([nc.p1_middle for nc in nc_list], index=df.index)
+    p1_lasts = pd.Series([nc.p1_last for nc in nc_list], index=df.index)
+    p2_firsts = pd.Series([nc.p2_first for nc in nc_list], index=df.index)
+    p2_middles = pd.Series([nc.p2_middle for nc in nc_list], index=df.index)
+    p2_lasts = pd.Series([nc.p2_last for nc in nc_list], index=df.index)
+
+    # ---- Address (V5: concatenate addr2 with " - " separator if present) ----
+    def _build_address(row_idx: int) -> str:
+        line1 = ""
+        line2 = ""
+        if addr_col is not None:
+            line1 = str(df.at[row_idx, addr_col]).strip()
+        if addr2_col is not None:
+            line2 = str(df.at[row_idx, addr2_col]).strip()
+            if line2.lower() in ("nan", "none", ""):
+                line2 = ""
+        if line1:
+            raw_addr = f"{line1} - {line2}" if line2 else line1
+        else:
+            raw_addr = line2
+        return format_street_address(_strip_trailing_csz(raw_addr)) if raw_addr else ""
+
+    if addr_col is not None or addr2_col is not None:
+        addresses = pd.Series([_build_address(i) for i in df.index], index=df.index)
     else:
         addresses = pd.Series("", index=df.index)
 
-    # ---- City / State / Zip (prefer dedicated columns, fall back to parsed) ----
+    # ---- City / State / Zip ----
     if city_col is not None:
         cities = _title_case_series(df[city_col])
     else:
@@ -345,6 +332,41 @@ def format_parcel_data(input_path: str, output_path: str) -> None:
     else:
         zips = parsed_zip.astype(str).apply(normalize_zip)
 
+    # ---- Original (raw) values before formatting ----
+    def _to_raw(val: str) -> str:
+        s = val.strip()
+        return "" if s.lower() in ("nan", "none") else s
+
+    orig_owner = (
+        df[owner_col].astype(str).apply(_to_raw) if owner_col is not None
+        else pd.Series("", index=df.index)
+    )
+    orig_titledept = (
+        df[name_line2_col].astype(str).apply(_to_raw) if name_line2_col is not None
+        else pd.Series("", index=df.index)
+    )
+    if addr_col is not None:
+        def _raw_addr(idx: int) -> str:
+            l1 = _to_raw(str(df.at[idx, addr_col]))
+            l2 = _to_raw(str(df.at[idx, addr2_col])) if addr2_col is not None else ""
+            return f"{l1} - {l2}" if l1 and l2 else (l1 or l2)
+        orig_addr = pd.Series([_raw_addr(i) for i in df.index], index=df.index)
+    else:
+        orig_addr = pd.Series("", index=df.index)
+
+    if city_col is not None:
+        orig_city = df[city_col].astype(str).apply(_to_raw)
+    else:
+        orig_city = parsed_city.apply(_to_raw)
+    if state_col is not None:
+        orig_state = df[state_col].astype(str).apply(_to_raw)
+    else:
+        orig_state = parsed_state.apply(_to_raw)
+    if zip_col is not None:
+        orig_zip = df[zip_col].astype(str).apply(_to_raw)
+    else:
+        orig_zip = parsed_zip.apply(_to_raw)
+
     # ---- Assemble output ----
     out = pd.DataFrame({
         OUTPUT_COLUMNS[0]: "Parcel",
@@ -354,6 +376,18 @@ def format_parcel_data(input_path: str, output_path: str) -> None:
         OUTPUT_COLUMNS[4]: cities,
         OUTPUT_COLUMNS[5]: states,
         OUTPUT_COLUMNS[6]: zips,
+        OUTPUT_COLUMNS[7]: p1_firsts,    # Primary First Name
+        OUTPUT_COLUMNS[8]: p1_middles,   # Primary Middle
+        OUTPUT_COLUMNS[9]: p1_lasts,     # Primary Last Name
+        OUTPUT_COLUMNS[10]: p2_firsts,   # 2nd Owner First Name
+        OUTPUT_COLUMNS[11]: p2_middles,  # 2nd Owner Middle
+        OUTPUT_COLUMNS[12]: p2_lasts,    # 2nd Owner Last Name
+        'Owner1_original': orig_owner,
+        'TitleDept_original': orig_titledept,
+        'Address1_original': orig_addr,
+        'City_original': orig_city,
+        'State_original': orig_state,
+        'Zip_original': orig_zip,
     })
 
     # Filter out unmailable rows: need both name AND address for mailing

@@ -1,16 +1,34 @@
 """
 Name formatting, classification, and household parsing for the mailing
-list deduplication pipeline (V4 clean rewrite).
+list deduplication pipeline (V5 — advanced parsing rules).
 
 Every public function in this module operates on raw owner-name strings
 that typically arrive in ALL-CAPS ``LAST FIRST`` order from county
 assessor data.  The module normalises them into readable, consistently
 formatted names suitable for printing on mailing labels and for
 downstream deduplication comparisons.
+
+V5 additions over V4:
+- ``NameComponents`` dataclass for structured name output (split columns).
+- ``parse_raw_owner_name`` — returns ``NameComponents`` for parcel records.
+- Improved slash-separated parsing: 2-token multi-letter owner2 segments
+  are now detected as **double first names** (e.g. "TONYA SUE") and share
+  the primary owner's surname rather than being treated as independent
+  LAST FIRST names.
+- All middle names are retained in full in the output (single-letter
+  initials receive a trailing period; full middle words are kept as-is).
+- Person suffixes (III, Jr., etc.) are preserved and repositioned to the
+  end of the shared surname in combined household names.
+- ``_normalize_lp`` pre-processes spaced abbreviations: "L P" -> "LP",
+  "L L C" -> "LLC", etc.
+- 4-token single-person names use dual-surname logic only when the 4th
+  token is a single letter (e.g. ROLON MEZA MARTHA E); otherwise all
+  tokens after the 1st are treated as First + Middle(s).
 """
 
 import re
-from typing import List
+from dataclasses import dataclass
+from typing import List, Tuple
 
 from .config import (
     TRUST_KEYWORDS,
@@ -36,7 +54,6 @@ _TRANSACTIONAL_SUFFIX_RE = re.compile(
 
 # Indicators we want to keep UPPER in formatted entity names.
 _INDICATOR_CANON: dict[str, str] = {
-    # True abbreviations stay ALL CAPS
     "INC": "INC", "INCORPORATED": "INC",
     "LLC": "LLC", "L L C": "LLC",
     "LTD": "LTD",
@@ -48,7 +65,6 @@ _INDICATOR_CANON: dict[str, str] = {
     "PLLC": "PLLC",
     "LP": "LP",
     "LLLP": "LLLP",
-    # Full words get title case
     "ASSOCIATES": "Associates",
     "ASSOC": "Assoc",
     "GROUP": "Group",
@@ -76,9 +92,40 @@ _INDICATOR_SET: set[str] = {
 # Person suffix set (dots stripped) for quick membership tests.
 _SUFFIX_SET: set[str] = {s.upper().rstrip(".") for s in PERSON_SUFFIXES}
 
-# Words that signal the name is an entity (used by normalize_name_for_comparison
-# to decide whether to sort tokens).
+# Words that signal the name is an entity.
 _ENTITY_SIGNAL_WORDS: set[str] = {"AND", "&", "TRUST", "LLC", "INC", "CORP", "LTD"}
+
+# Regex to normalise spaced entity abbreviations before classification.
+_LP_SPACES_RE = re.compile(
+    r"\bL\s+L\s+L\s+P\b"   # LLLP (most specific first)
+    r"|\bP\s+L\s+L\s+C\b"  # PLLC
+    r"|\bL\s+L\s+C\b"      # LLC
+    r"|\bL\s+L\s+P\b"      # LLP
+    r"|\bL\s+T\s+D\b"      # LTD
+    r"|\bL\s+P\b",          # LP
+    flags=re.IGNORECASE,
+)
+
+
+# ── NameComponents dataclass ────────────────────────────────────────────
+
+
+@dataclass
+class NameComponents:
+    """Structured name components parsed from a raw county-parcel owner string.
+
+    For businesses, trusts, and government entities only ``full_name`` and
+    ``is_business`` are populated; all person-name fields are left empty.
+    """
+
+    full_name: str = ""
+    p1_first: str = ""
+    p1_middle: str = ""
+    p1_last: str = ""
+    p2_first: str = ""
+    p2_middle: str = ""
+    p2_last: str = ""
+    is_business: bool = False
 
 
 # ── internal helpers ────────────────────────────────────────────────────
@@ -90,54 +137,30 @@ def _upper(value: str) -> str:
 
 
 def _title_case_word(word: str) -> str:
-    """Title-case a single name token, handling special prefixes.
-
-    * Single letter  -> uppercase (``J`` stays ``J``)
-    * ``J.``         -> ``J.``
-    * O'Brien style  -> ``O'Brien``
-    * McDonald       -> ``McDonald``
-    * MacGregor      -> ``MacGregor``
-    * Otherwise      -> standard ``.capitalize()``
-    """
+    """Title-case a single name token, handling special prefixes."""
     if not word:
         return word
-
-    # Single-letter initials
     if len(word) == 1:
         return word.upper()
     if len(word) == 2 and word[1] == ".":
         return word[0].upper() + "."
-
     upper = word.upper()
-
-    # O' prefix
     if upper.startswith("O'") and len(word) > 2:
         return "O'" + word[2:].capitalize()
-
-    # Mc prefix
     if upper.startswith("MC") and len(word) > 2:
         return "Mc" + word[2:].capitalize()
-
-    # Mac prefix  (only when remainder is >=3 chars to avoid false hits like "Mace")
     if upper.startswith("MAC") and len(word) > 5:
         return "Mac" + word[3:].capitalize()
-
     return word.lower().capitalize()
 
 
 def _smart_title_case_name(words: List[str]) -> str:
-    """Title-case a list of name tokens, keeping known particles lower-case.
-
-    Multi-word particles such as ``de la`` are matched greedily (longest
-    first) so that ``DE LA CRUZ`` becomes ``de la Cruz``.
-    """
-    # Pre-build sorted particle tuples (longest first for greedy matching).
+    """Title-case a list of name tokens, keeping known particles lower-case."""
     particle_tuples = sorted(
         (tuple(p.split()) for p in NAME_PARTICLES),
         key=len,
         reverse=True,
     )
-
     result: List[str] = []
     i = 0
     n = len(words)
@@ -158,22 +181,75 @@ def _smart_title_case_name(words: List[str]) -> str:
     return " ".join(result)
 
 
-def _strip_person_suffixes(parts: List[str]) -> List[str]:
-    """Return *parts* with trailing person suffixes (JR, SR, II, III ...) removed."""
-    if not parts:
-        return parts
+def _extract_suffix(parts: List[str]) -> Tuple[List[str], str]:
+    """Strip trailing person suffixes; return (remaining_tokens, suffix_string).
+
+    Examples::
+
+        ["SMITH", "JOHN", "III"]  ->  (["SMITH", "JOHN"], "III")
+        ["SMITH", "JOHN", "JR"]   ->  (["SMITH", "JOHN"], "Jr.")
+    """
     out = list(parts)
+    suffix_parts: List[str] = []
     while out and out[-1].upper().rstrip(".") in _SUFFIX_SET:
-        out.pop()
-    return out
+        raw = out.pop()
+        upper = raw.upper().rstrip(".")
+        if upper == "JR":
+            suffix_parts.insert(0, "Jr.")
+        elif upper == "SR":
+            suffix_parts.insert(0, "Sr.")
+        else:
+            suffix_parts.insert(0, upper)
+    return out, " ".join(suffix_parts)
+
+
+def _strip_person_suffixes(parts: List[str]) -> List[str]:
+    """Return *parts* with trailing person suffixes removed (backward-compat)."""
+    tokens, _ = _extract_suffix(parts)
+    return tokens
 
 
 def _strip_transactional_suffixes(name: str) -> str:
     """Remove trailing transactional noise (PMT #, PERMIT, APN) from *name*."""
     if not name:
         return ""
-    cleaned = _TRANSACTIONAL_SUFFIX_RE.sub("", name)
-    return normalize_whitespace(cleaned)
+    return normalize_whitespace(_TRANSACTIONAL_SUFFIX_RE.sub("", name))
+
+
+def _normalize_lp(name: str) -> str:
+    """Normalise spaced entity-type abbreviations before classification.
+
+    Examples::
+
+        "L P"     -> "LP"
+        "L L C"   -> "LLC"
+        "L L P"   -> "LLP"
+    """
+    def _collapse(m: re.Match) -> str:
+        return m.group(0).upper().replace(" ", "")
+    return _LP_SPACES_RE.sub(_collapse, name)
+
+
+def _format_middle_tokens(tokens: List[str]) -> str:
+    """Format middle-name tokens.  All middles are retained in full.
+
+    Single-letter initials receive a trailing period; full words are title-cased.
+
+    Examples::
+
+        ["W"]               -> "W."
+        ["WILLIAM"]         -> "William"
+        ["NOE", "MORALES"]  -> "Noe Morales"
+        ["LOGAN", "THOMAS"] -> "Logan Thomas"
+    """
+    parts = []
+    for t in tokens:
+        stripped = t.rstrip(".")
+        if len(stripped) == 1 and stripped.isalpha():
+            parts.append(stripped.upper() + ".")
+        else:
+            parts.append(_title_case_word(t))
+    return " ".join(parts)
 
 
 _COMMON_SHORT_WORDS = frozenset({
@@ -205,26 +281,21 @@ _COMMON_SHORT_WORDS = frozenset({
     "TOW", "TOY", "TRY", "TWO", "URN", "USE", "WAD", "WAR", "WAX", "WAY",
     "WEB", "WED", "WET", "WHO", "WHY", "WIG", "WOE", "WOK", "WON", "WOO",
     "WOW", "YAM", "YAW", "YES", "YET", "YEW", "YOU", "ZEN", "ZOO",
+    # Common words/names that look like acronyms but are not
+    "OZ", "ANN", "LEE", "RAY", "MAE", "SUE", "KAY", "JOY", "DEE",
+    "BEE", "GEE", "TEE", "VEE", "WEE",
 })
 
 
 def _is_acronym(token: str) -> bool:
-    """Return True if *token* looks like a genuine acronym.
-
-    Heuristics:
-    - Any token with no vowels (e.g. ``BFS``, ``RR``, ``NW``)
-    - 2-3 letter tokens that aren't common English words (e.g. ``ABC``, ``USA``)
-    - 4+ letter tokens with vowels are always treated as words
-    """
+    """Return True if *token* looks like a genuine acronym."""
     if not token.isalpha():
         return False
     upper = token.upper()
     vowels = set("AEIOU")
     has_vowel = bool(set(upper) & vowels)
-    # No vowels -> likely an acronym
     if not has_vowel:
         return True
-    # 2-3 letter tokens: acronym unless it's a common word
     if len(upper) <= 3 and upper not in _COMMON_SHORT_WORDS:
         return True
     return False
@@ -234,37 +305,27 @@ def _is_acronym(token: str) -> bool:
 
 
 def is_trust(name: str) -> bool:
-    """Return ``True`` if *name* contains any of the ``TRUST_KEYWORDS``."""
+    """Return True if *name* contains any of the TRUST_KEYWORDS as whole words."""
     if not name:
         return False
     upper = _upper(name)
-    return any(kw in upper for kw in TRUST_KEYWORDS)
+    padded = f" {upper} "
+    return any(f" {kw} " in padded for kw in TRUST_KEYWORDS)
 
 
 def is_government_entity(name: str) -> bool:
-    """Return ``True`` if *name* contains any ``GOVERNMENT_KEYWORDS``.
-
-    Phrase keywords (e.g. 'CITY OF', 'DEPARTMENT') use substring matching.
-    Short word keywords (e.g. 'DISTRICT', 'AGENCY') use word-boundary matching
-    to avoid false positives like 'JESUS' matching 'US'.
-    """
+    """Return True if *name* contains any GOVERNMENT_KEYWORDS."""
     if not name:
         return False
     upper = _upper(name)
-    # Phrase keywords: substring match is safe for multi-word phrases
     if any(kw in upper for kw in GOVERNMENT_KEYWORDS):
         return True
-    # Word keywords: require word boundaries
     padded = f" {upper} "
     return any(f" {kw} " in padded for kw in GOVERNMENT_WORD_KEYWORDS)
 
 
 def is_entity(name: str) -> bool:
-    """Return ``True`` if *name* looks like a company / organisation.
-
-    Uses word-boundary matching so that ``IND`` inside ``INDIVIDUAL``
-    does not trigger a false positive.
-    """
+    """Return True if *name* looks like a company / organisation."""
     if not name:
         return False
     upper = _upper(name)
@@ -277,25 +338,19 @@ def is_entity(name: str) -> bool:
 
 
 def format_trust_name(name: str) -> str:
-    """Format a trust name into readable title-case with trailing ``Trust``.
+    """Format a trust name into readable title-case with trailing Trust.
 
     Examples::
 
         SMITH JOHN & MARY FAMILY TRUST  ->  John & Mary Smith Family Trust
         THE SMITH TRUST                 ->  Smith Trust
-        SMITH TRUST THE                 ->  Smith Trust
     """
     if not name:
         return ""
-
     raw = normalize_whitespace(name)
     upper = raw.upper()
-
-    # Normalise reversed patterns: ``TRUST THE`` / ``TR THE`` -> keyword alone.
     upper = re.sub(r"\bTRUST\s+THE\b", "TRUST", upper)
     upper = re.sub(r"\bTR\s+THE\b", "TR", upper)
-
-    # Locate the earliest trust keyword.
     best_pos: int | None = None
     best_kw: str | None = None
     for kw in TRUST_KEYWORDS:
@@ -303,54 +358,34 @@ def format_trust_name(name: str) -> str:
         if pos != -1 and (best_pos is None or pos < best_pos):
             best_pos = pos
             best_kw = kw
-
     if best_pos is not None:
         subject = upper[:best_pos].strip()
     else:
         subject = upper
-
-    # If nothing before the keyword, take everything minus the keyword.
     if not subject and best_kw:
         subject = upper.replace(best_kw, "", 1).strip()
-
-    # Strip leading/trailing THE.
     subject = re.sub(r"^\s*THE\b[\s,]*", "", subject, flags=re.IGNORECASE).strip()
     subject = re.sub(r"[\s,]*\bTHE\s*$", "", subject, flags=re.IGNORECASE).strip()
-
     tokens = subject.split()
     if not tokens:
         return "Trust"
-
     titled = _smart_title_case_name(tokens)
-    # Avoid "Trust Trust" doubling when the subject already ends with "Trust"
     if titled.upper().endswith(" TRUST") or titled.upper() == "TRUST":
         return titled
     return f"{titled} Trust"
 
 
 def format_government_entity(name: str) -> str:
-    """Format a government / public-entity name into readable title-case.
-
-    Examples::
-
-        DEPT ARIZONA TRANSPORTATION                ->  Arizona Transportation Dept
-        MARICOPA COUNTY FLOOD CONTROL DISTRICT     ->  Maricopa County Flood Control District
-        STATE OF ARIZONA                           ->  State of Arizona
-    """
+    """Format a government / public-entity name into readable title-case."""
     if not name:
         return ""
-
     raw = normalize_whitespace(name)
     upper = raw.upper()
-
-    # ``DEPT X Y`` -> ``X Y Dept``
     m = re.match(r"^DEPT\.?\s+(.+)$", upper)
     if m:
         body = m.group(1).strip()
         body_titled = " ".join(_title_case_word(w) for w in body.split())
         return f"{body_titled} Dept"
-
-    # General: title-case each word; keep ``of`` lower-case.
     words = raw.split()
     out: List[str] = []
     lowercase_particles = {"OF", "THE", "AND", "FOR"}
@@ -360,7 +395,6 @@ def format_government_entity(name: str) -> str:
             out.append(w.lower())
         else:
             out.append(_title_case_word(w))
-    # First word always capitalised.
     if out:
         out[0] = out[0][0].upper() + out[0][1:] if out[0] else out[0]
     return " ".join(out)
@@ -369,65 +403,59 @@ def format_government_entity(name: str) -> str:
 def format_entity_name(name: str) -> str:
     """Format a company / organisation name.
 
-    * Title-cases regular words.
-    * Keeps known indicators (LLC, INC, CORP ...) uppercase.
-    * Preserves short all-caps acronyms.
-    * Strips transactional suffixes (PMT #, PERMIT, APN patterns).
+    Normalises spaced abbreviations ("L P" -> "LP"), keeps known entity
+    indicators uppercase, preserves genuine acronyms, title-cases words.
 
-    Example::
+    Examples::
 
-        ABC INVESTMENTS LLC  ->  ABC Investments LLC
+        ABC INVESTMENTS LLC       ->  ABC Investments LLC
+        KEMF WP 3 EAST LLC        ->  KEMF WP 3 East LLC
+        WESTPARK OZ VENTURES LLC  ->  Westpark Oz Ventures LLC
     """
     if not name:
         return ""
-
     raw = _strip_transactional_suffixes(name)
     if not raw:
         return ""
-
+    raw = _normalize_lp(raw)
     tokens = raw.split()
     formatted: List[str] = []
-
     for tok in tokens:
         stripped = tok.strip(",.")
         normalised = stripped.upper().replace(".", "")
-
         if normalised in _INDICATOR_SET:
-            # Use canonical form if available; fall back to normalised.
             formatted.append(_INDICATOR_CANON.get(normalised, normalised))
         elif _is_acronym(stripped):
             formatted.append(stripped.upper())
         else:
             formatted.append(_title_case_word(stripped))
-
     return " ".join(formatted).strip()
 
 
 def format_person_name_from_lastfirst(name: str) -> str:
-    """Format a person name from ``LAST FIRST [MIDDLE]`` order.
+    """Format a person name from LAST FIRST [MIDDLE...] order.
 
-    Handles comma-separated ``LAST, FIRST`` input as well as
-    space-separated variants with 2-5 tokens.
+    V5 token-count heuristics::
 
-    Token-count heuristics::
+        2 tokens  -- LAST FIRST              ->  First Last
+        3 tokens  -- LAST FIRST MID          ->  First Mid Last
+        4 tokens, last is single letter
+                  -- ROLON MEZA MARTHA E     ->  Martha E. Rolon Meza  (dual surname)
+        4 tokens, last is multi-letter
+                  -- SMITH JOHN MICHAEL WILLIAM -> John Michael William Smith
+        5 tokens, 3rd is single letter
+                  -- ALVAREZ MARTHA E ROLON MEZA -> Martha E. Alvarez Rolon Meza
+        5 tokens, 3rd is multi-letter
+                  -- LAST FIRST MID1 MID2 MID3 -> First Mid1 Mid2 Mid3 Last
+        6+ tokens -- first token = last, rest = first + all middles
 
-        2 tokens  – ``SMITH JOHN``           ->  John Smith
-        3 tokens  – ``SMITH JOHN A``         ->  John A. Smith
-        4 tokens  – ``ROLON MEZA MARTHA E``  ->  Martha E. Rolon Meza
-                     (first two = surnames, last two = given + middle)
-        5 tokens  – ``ALVAREZ MARTHA E ROLON MEZA``
-                     ->  Martha E. Alvarez Rolon Meza
-                     (first = surname, 2-3 = given+middle, 4-5 = additional surnames)
-
-    Single-letter middle initials receive a trailing period.
-    Person suffixes (JR, SR, II, III …) are stripped.
+    All middle names are retained in full.  Single-letter initials get a
+    trailing period.  Person suffixes are stripped (use parse_raw_owner_name
+    to retain and reposition them).
     """
     if not name:
         return ""
-
     raw = normalize_whitespace(name)
-
-    # ── comma-separated LAST, FIRST MIDDLE ──
     if "," in raw:
         parts = [p.strip() for p in raw.split(",", 1)]
         if len(parts) == 2 and parts[0] and parts[1]:
@@ -443,174 +471,62 @@ def format_person_name_from_lastfirst(name: str) -> str:
                     fm.append(_title_case_word(t))
             last_tc = _smart_title_case_name(last.split())
             return f"{' '.join(fm)} {last_tc}".strip()
-
     tokens = raw.split()
     if not tokens:
         return ""
     if len(tokens) == 1:
         return _smart_title_case_name(tokens)
-
     tokens = _strip_person_suffixes(tokens)
     if not tokens:
         return ""
-
-    # ── 2 tokens: LAST FIRST ──
     if len(tokens) == 2:
         last, first = tokens
         return f"{_title_case_word(first)} {_smart_title_case_name([last])}"
-
-    # ── 3 tokens: LAST FIRST MIDDLE ──
     if len(tokens) == 3:
         last, first, mid = tokens
-        first_tc = _title_case_word(first)
-        mid_tc = mid[0].upper() + "." if len(mid) == 1 else _title_case_word(mid)
-        last_tc = _smart_title_case_name([last])
-        return f"{first_tc} {mid_tc} {last_tc}"
-
-    # ── 4 tokens: SURNAME1 SURNAME2 GIVEN MIDDLE (Hispanic dual-surname) ──
+        return (
+            f"{_title_case_word(first)} {_format_middle_tokens([mid])} "
+            f"{_smart_title_case_name([last])}"
+        )
     if len(tokens) == 4:
-        s1, s2, given, mid = tokens
-        given_tc = _title_case_word(given)
-        mid_tc = mid[0].upper() + "." if len(mid) == 1 else _title_case_word(mid)
-        surname_tc = _smart_title_case_name([s1, s2])
-        return f"{given_tc} {mid_tc} {surname_tc}"
-
-    # ── 5 tokens: SURNAME GIVEN MIDDLE SURNAME2 SURNAME3 ──
-    if len(tokens) == 5:
-        s1, given, mid, s2, s3 = tokens
-        given_tc = _title_case_word(given)
-        mid_tc = mid[0].upper() + "." if len(mid) == 1 else _title_case_word(mid)
-        surname_tc = _smart_title_case_name([s1, s2, s3])
-        return f"{given_tc} {mid_tc} {surname_tc}"
-
-    # ── 6+ tokens: best-effort first-as-surname, rest split ──
-    last = tokens[0]
-    given_mid = tokens[1:]
-    given_parts: List[str] = []
-    for g in given_mid:
-        if len(g) == 1:
-            given_parts.append(g[0].upper() + ".")
+        s1, s2, s3, s4 = tokens
+        if len(s4.rstrip(".")) == 1:
+            # Dual-surname: LAST1 LAST2 FIRST INITIAL
+            return (
+                f"{_title_case_word(s3)} {s4.upper().rstrip('.')}. "
+                f"{_smart_title_case_name([s1, s2])}"
+            )
         else:
-            given_parts.append(_title_case_word(g))
-    last_tc = _smart_title_case_name([last])
-    return f"{' '.join(given_parts)} {last_tc}".strip()
+            # LAST FIRST MID1 MID2
+            return (
+                f"{_title_case_word(s2)} {_format_middle_tokens([s3, s4])} "
+                f"{_smart_title_case_name([s1])}"
+            )
+    if len(tokens) == 5:
+        s1, s2, s3, s4, s5 = tokens
+        if len(s3.rstrip(".")) == 1:
+            # LAST FIRST INITIAL SURNAME2 SURNAME3
+            return (
+                f"{_title_case_word(s2)} {s3.upper().rstrip('.')}. "
+                f"{_smart_title_case_name([s1, s4, s5])}"
+            )
+        else:
+            # LAST FIRST MID1 MID2 MID3
+            return (
+                f"{_title_case_word(s2)} {_format_middle_tokens([s3, s4, s5])} "
+                f"{_smart_title_case_name([s1])}"
+            )
+    # 6+ tokens
+    last = tokens[0]
+    first = tokens[1]
+    mid_tokens = tokens[2:]
+    return (
+        f"{_title_case_word(first)} {_format_middle_tokens(mid_tokens)} "
+        f"{_smart_title_case_name([last])}"
+    ).strip()
 
 
-# ── household extraction ────────────────────────────────────────────────
-
-
-def extract_individuals_from_household(household_name: str) -> List[str]:
-    """Split a combined household string into individually formatted names.
-
-    Supported patterns:
-
-    * Slash-separated::
-
-        VALDEZ MIGUEL/ORTIZ FRANCISCO  ->  [Miguel Valdez, Francisco Ortiz]
-
-    * Backslash::
-
-        STATE OF ARIZONA\\DELBERT A  ->  [State of Arizona, Delbert A]
-
-    * Ampersand with shared surname::
-
-        SMITH JOHN & MARY  ->  [John Smith, Mary Smith]
-
-    * Ampersand with different surnames::
-
-        SMITH JOHN & JONES MARY  ->  [John Smith, Mary Jones]
-
-    * Comma-separated household::
-
-        EVANS TOMMY W, STEPHANE, AND ELIZABETH
-            ->  [Tommy W. Evans, Stephane Evans, Elizabeth Evans]
-
-    * ``and`` conjunction::
-
-        John and Mary Smith  ->  [John Smith, Mary Smith]
-
-    ``C/O`` and ``A/C`` slashes are **not** treated as person separators.
-    """
-    if not household_name:
-        return []
-
-    raw = normalize_whitespace(household_name)
-    if not raw:
-        return []
-
-    upper_raw = raw.upper()
-
-    # ── protect C/O and A/C from being split ──
-    protected = re.sub(r"\bC/O\b", "C__SLASH__O", raw, flags=re.IGNORECASE)
-    protected = re.sub(r"\bA/C\b", "A__SLASH__C", protected, flags=re.IGNORECASE)
-
-    # ── detect slash / backslash separation ──
-    if "/" in protected or "\\" in protected:
-        parts = re.split(r"[/\\]", protected)
-        parts = [p.replace("C__SLASH__O", "C/O").replace("A__SLASH__C", "A/C").strip()
-                 for p in parts if p.strip()]
-        if not parts:
-            return []
-        # Format the first part (full LAST FIRST name).
-        first_formatted = _format_segment(parts[0])
-        first_last = _extract_last_name(first_formatted)
-        results = [first_formatted] if first_formatted else []
-        for part in parts[1:]:
-            if not part:
-                continue
-            tokens = part.split()
-            if len(tokens) == 1:
-                # Bare given name -> share surname from first entry.
-                given_tc = _title_case_word(tokens[0])
-                if first_last:
-                    results.append(f"{given_tc} {first_last}")
-                else:
-                    results.append(given_tc)
-            elif _looks_like_given_plus_initial(tokens):
-                # FIRST INITIAL -> share surname from first entry.
-                given_tc = _title_case_word(tokens[0])
-                mid_tc = tokens[1].rstrip(".")[0].upper() + "."
-                if first_last:
-                    results.append(f"{given_tc} {mid_tc} {first_last}")
-                else:
-                    results.append(f"{given_tc} {mid_tc}")
-            else:
-                # Full multi-word name -> independent LAST FIRST.
-                results.append(_format_segment(part))
-        return _dedupe(results)
-
-    # Restore protections for non-slash paths.
-    raw = protected.replace("C__SLASH__O", "C/O").replace("A__SLASH__C", "A/C")
-
-    # ── comma-separated household with optional AND ──
-    # Pattern: "EVANS TOMMY W, STEPHANE, AND ELIZABETH"
-    if "," in raw:
-        segments = re.split(r"\s*,\s*", raw)
-        segments = [re.sub(r"^\s*(?:AND|&)\s+", "", s, flags=re.IGNORECASE).strip()
-                    for s in segments if s.strip()]
-        if segments:
-            # First segment is the full LAST FIRST [MID] primary.
-            primary = _format_segment(segments[0])
-            primary_last = _extract_last_name(primary)
-            results = [primary]
-            for seg in segments[1:]:
-                seg = seg.strip()
-                if not seg:
-                    continue
-                formatted = _format_segment(seg)
-                # If this segment is a bare given name, attach the shared surname.
-                if primary_last and len(formatted.split()) == 1:
-                    formatted = f"{formatted} {primary_last}"
-                results.append(formatted)
-            return _dedupe(results)
-
-    # ── ampersand / AND splitting ──
-    amp_parts = re.split(r"\s+&\s+|\s+AND\s+", raw, flags=re.IGNORECASE)
-    if len(amp_parts) >= 2:
-        return _resolve_ampersand_parts(amp_parts)
-
-    # ── single name (no delimiters) ──
-    return [_format_segment(raw)]
+# ── internal formatting helpers ─────────────────────────────────────────
 
 
 def _format_segment(segment: str) -> str:
@@ -618,21 +534,65 @@ def _format_segment(segment: str) -> str:
     segment = normalize_whitespace(segment)
     if not segment:
         return ""
-
-    # Check for entity-like segments.
     if is_trust(segment):
         return format_trust_name(segment)
     if is_government_entity(segment):
         return format_government_entity(segment)
     if is_entity(segment):
         return format_entity_name(segment)
-
-    # If it looks like ALL-CAPS input, treat as LAST FIRST ordering.
     if segment == segment.upper() and any(c.isalpha() for c in segment):
         return format_person_name_from_lastfirst(segment)
-
-    # Already mixed-case – return with light normalisation.
     return segment
+
+
+def _format_independent_slash_owner(part: str, owner1_last: str = "") -> str:
+    """Format a 3+ token slash-separated owner segment as an independent person.
+
+    Always treats token[0] as the last (sur)name and token[1] as the first
+    name, with token[2:] as middle names (all retained).  Entity/trust
+    detection still applies.
+
+    Special data-error case: if the last token of *part* matches
+    *owner1_last* (case-insensitive), the last token is treated as the
+    shared surname and the first token becomes the first name.
+    Example: "RYAN LOGAN THOMAS NIDA" when owner1_last="Nida" ->
+    "Ryan Logan Thomas Nida" (first=Ryan, mid=Logan Thomas, last=Nida).
+    """
+    part = normalize_whitespace(part)
+    if not part:
+        return ""
+    if is_trust(part):
+        return format_trust_name(part)
+    if is_government_entity(part):
+        return format_government_entity(part)
+    if is_entity(part):
+        return format_entity_name(part)
+    tokens = [t for t in part.split() if t]
+    tokens, suffix = _extract_suffix(tokens)
+    if not tokens:
+        return suffix if suffix else ""
+    if len(tokens) == 1:
+        result = _title_case_word(tokens[0])
+        return f"{result} {suffix}".strip() if suffix else result
+    # Special case: repeated surname (data error)
+    if (
+        owner1_last
+        and len(tokens) >= 3
+        and tokens[-1].upper() == owner1_last.upper()
+    ):
+        first_raw = tokens[0]
+        last_raw = tokens[-1]
+        mid_tokens = tokens[1:-1]
+    else:
+        last_raw = tokens[0]
+        first_raw = tokens[1]
+        mid_tokens = tokens[2:]
+    first_tc = _title_case_word(first_raw)
+    last_tc = _smart_title_case_name([last_raw])
+    mid_tc = _format_middle_tokens(mid_tokens) if mid_tokens else ""
+    parts_list = [p for p in [first_tc, mid_tc, last_tc] if p]
+    result = " ".join(parts_list)
+    return f"{result} {suffix}".strip() if suffix else result
 
 
 def _extract_last_name(formatted_name: str) -> str:
@@ -642,66 +602,141 @@ def _extract_last_name(formatted_name: str) -> str:
 
 
 def _looks_like_given_plus_initial(tokens: List[str]) -> bool:
-    """Return True if *tokens* look like a given name with a middle initial
-    rather than a LAST FIRST name.
+    """Return True if tokens look like FIRST INITIAL (not FIRST DOUBLEFIRST).
 
-    Patterns detected:
-    - ``["MARIA", "T"]``  (first + single-letter initial)
-    - ``["MARIA", "T."]`` (first + initial with period)
-    - ``["ESTHER", "G"]`` (first + single-letter initial)
-
-    NOT matched:
-    - ``["HOFF", "LINDA"]`` (both multi-letter -> LAST FIRST)
+    Matched:     ["MARIA", "T"]   or   ["MARIA", "T."]
+    Not matched: ["MARGARET", "ANN"]  (both multi-letter -> double first name)
     """
     if len(tokens) != 2:
         return False
     second = tokens[1].rstrip(".")
-    # Second token is a single letter -> this is FIRST INITIAL, not LAST FIRST
     return len(second) == 1 and second.isalpha()
 
 
-def _resolve_ampersand_parts(parts: List[str]) -> List[str]:
-    """Handle ``&`` / ``AND`` separated names with possible shared surname.
+# ── household extraction ────────────────────────────────────────────────
 
-    If the first part has >=2 words (``SMITH JOHN``) and subsequent parts
-    are single given names (``MARY``), the surname from the first part is
-    shared.  If a subsequent part has its own multi-word structure, it is
-    treated as an independent LAST FIRST name.
 
-    Special case: a two-token part where the second token is a single-letter
-    initial (e.g. ``MARIA T``) is treated as FIRST INITIAL + shared surname,
-    not as LAST FIRST.
+def extract_individuals_from_household(household_name: str) -> List[str]:
+    """Split a combined household string into individually formatted names.
+
+    V5 slash-separator rules:
+
+    * 1 token owner2              -> share surname
+    * 2 tokens, 2nd is initial    -> FIRST INITIAL  (share surname)
+    * 2 tokens, both multi-letter -> DOUBLE FIRST NAME  (share surname)
+    * 3+ tokens                   -> independent owner (own LAST FIRST MID...)
+
+    Other supported patterns: backslash, ampersand, AND conjunction,
+    comma-separated list.
+
+    C/O and A/C slashes are never treated as person separators.
     """
+    if not household_name:
+        return []
+    raw = normalize_whitespace(household_name)
+    if not raw:
+        return []
+
+    # Protect C/O and A/C
+    protected = re.sub(r"\bC/O\b", "C__SLASH__O", raw, flags=re.IGNORECASE)
+    protected = re.sub(r"\bA/C\b", "A__SLASH__C", protected, flags=re.IGNORECASE)
+
+    # Slash / backslash separation
+    if "/" in protected or "\\" in protected:
+        parts = re.split(r"[/\\]", protected)
+        parts = [
+            p.replace("C__SLASH__O", "C/O").replace("A__SLASH__C", "A/C").strip()
+            for p in parts
+            if p.strip()
+        ]
+        if not parts:
+            return []
+        first_formatted = _format_segment(parts[0])
+        first_last = _extract_last_name(first_formatted)
+        results = [first_formatted] if first_formatted else []
+        for part in parts[1:]:
+            if not part:
+                continue
+            tokens = [t for t in part.split() if t]
+            if len(tokens) == 1:
+                given_tc = _title_case_word(tokens[0])
+                results.append(f"{given_tc} {first_last}" if first_last else given_tc)
+            elif _looks_like_given_plus_initial(tokens):
+                given_tc = _title_case_word(tokens[0])
+                mid_tc = tokens[1].rstrip(".")[0].upper() + "."
+                results.append(
+                    f"{given_tc} {mid_tc} {first_last}" if first_last
+                    else f"{given_tc} {mid_tc}"
+                )
+            elif len(tokens) == 2:
+                # V5: both multi-letter -> double first name, share surname
+                double_first = (
+                    f"{_title_case_word(tokens[0])} {_title_case_word(tokens[1])}"
+                )
+                results.append(
+                    f"{double_first} {first_last}" if first_last else double_first
+                )
+            else:
+                # 3+ tokens: independent owner
+                results.append(_format_independent_slash_owner(part, first_last))
+        return _dedupe(results)
+
+    # Restore protections
+    raw = protected.replace("C__SLASH__O", "C/O").replace("A__SLASH__C", "A/C")
+
+    # Comma-separated household
+    if "," in raw:
+        segments = re.split(r"\s*,\s*", raw)
+        segments = [
+            re.sub(r"^\s*(?:AND|&)\s+", "", s, flags=re.IGNORECASE).strip()
+            for s in segments
+            if s.strip()
+        ]
+        if segments:
+            primary = _format_segment(segments[0])
+            primary_last = _extract_last_name(primary)
+            results = [primary]
+            for seg in segments[1:]:
+                seg = seg.strip()
+                if not seg:
+                    continue
+                formatted = _format_segment(seg)
+                if primary_last and len(formatted.split()) == 1:
+                    formatted = f"{formatted} {primary_last}"
+                results.append(formatted)
+            return _dedupe(results)
+
+    # Ampersand / AND splitting
+    amp_parts = re.split(r"\s+&\s+|\s+AND\s+", raw, flags=re.IGNORECASE)
+    if len(amp_parts) >= 2:
+        return _resolve_ampersand_parts(amp_parts)
+
+    # Single name
+    return [_format_segment(raw)]
+
+
+def _resolve_ampersand_parts(parts: List[str]) -> List[str]:
+    """Handle & / AND separated names with possible shared surname."""
     first_formatted = _format_segment(parts[0].strip())
     first_last = _extract_last_name(first_formatted)
     results = [first_formatted]
-
     for part in parts[1:]:
         part = part.strip()
         if not part:
             continue
-
         tokens = part.split()
-
         if len(tokens) == 1:
-            # Single given name -> share surname from first entry.
             given_tc = _title_case_word(tokens[0])
-            if first_last:
-                results.append(f"{given_tc} {first_last}")
-            else:
-                results.append(given_tc)
+            results.append(f"{given_tc} {first_last}" if first_last else given_tc)
         elif _looks_like_given_plus_initial(tokens):
-            # FIRST INITIAL pattern -> share surname from first entry.
             given_tc = _title_case_word(tokens[0])
             mid_tc = tokens[1].rstrip(".")[0].upper() + "."
-            if first_last:
-                results.append(f"{given_tc} {mid_tc} {first_last}")
-            else:
-                results.append(f"{given_tc} {mid_tc}")
+            results.append(
+                f"{given_tc} {mid_tc} {first_last}" if first_last
+                else f"{given_tc} {mid_tc}"
+            )
         else:
-            # Multi-word with real second name -> independent name.
             results.append(_format_segment(part))
-
     return _dedupe(results)
 
 
@@ -716,98 +751,485 @@ def _dedupe(names: List[str]) -> List[str]:
     return out
 
 
-# ── comparison normalisation ────────────────────────────────────────────
+# ── structured parsing (V5) ─────────────────────────────────────────────
 
 
-def normalize_name_for_comparison(name: str) -> str:
-    """Produce a normalised key for deduplication comparisons.
+def _parse_single_to_components(raw: str) -> NameComponents:
+    """Parse a single-person raw owner string into NameComponents."""
+    tokens = [t for t in raw.split() if t]
+    if not tokens:
+        return NameComponents()
+    tokens, suffix = _extract_suffix(tokens)
+    if not tokens:
+        return NameComponents(full_name=suffix)
+    if len(tokens) == 1:
+        name = _title_case_word(tokens[0])
+        full = f"{name} {suffix}".strip() if suffix else name
+        return NameComponents(full_name=full, p1_first=name)
+    if len(tokens) == 2:
+        last, first = tokens
+        p1_first = _title_case_word(first)
+        p1_last = _smart_title_case_name([last])
+        full = f"{p1_first} {p1_last}"
+        if suffix:
+            full += f" {suffix}"
+        return NameComponents(full_name=full, p1_first=p1_first, p1_last=p1_last)
+    if len(tokens) == 3:
+        last, first, mid = tokens
+        p1_first = _title_case_word(first)
+        p1_middle = _format_middle_tokens([mid])
+        p1_last = _smart_title_case_name([last])
+        full = f"{p1_first} {p1_middle} {p1_last}"
+        if suffix:
+            full += f" {suffix}"
+        return NameComponents(
+            full_name=full, p1_first=p1_first, p1_middle=p1_middle, p1_last=p1_last
+        )
+    if len(tokens) == 4:
+        s1, s2, s3, s4 = tokens
+        if len(s4.rstrip(".")) == 1:
+            p1_first = _title_case_word(s3)
+            p1_middle = s4.upper().rstrip(".") + "."
+            p1_last = _smart_title_case_name([s1, s2])
+        else:
+            p1_first = _title_case_word(s2)
+            p1_middle = _format_middle_tokens([s3, s4])
+            p1_last = _smart_title_case_name([s1])
+        full = f"{p1_first} {p1_middle} {p1_last}"
+        if suffix:
+            full += f" {suffix}"
+        return NameComponents(
+            full_name=full, p1_first=p1_first, p1_middle=p1_middle, p1_last=p1_last
+        )
+    # 5+ tokens
+    p1_last = _smart_title_case_name([tokens[0]])
+    p1_first = _title_case_word(tokens[1])
+    p1_middle = _format_middle_tokens(tokens[2:])
+    full = f"{p1_first} {p1_middle} {p1_last}".strip()
+    if suffix:
+        full += f" {suffix}"
+    return NameComponents(
+        full_name=full, p1_first=p1_first, p1_middle=p1_middle, p1_last=p1_last
+    )
 
-    * **Entities** (trusts, companies, government): upper-case, strip
-      punctuation, preserve word order.
-    * **Persons**: upper-case, strip punctuation, remove suffixes, then
-      **sort words alphabetically** so that ``Francisco Rodriguez`` and
-      ``Rodriguez Francisco`` yield the **same** key.
 
-    Names containing entity signal words (AND, &, TRUST, LLC, INC …) are
-    never word-sorted to avoid mangling entity names.
+def _parse_slash_to_components(parts: List[str]) -> NameComponents:
+    """Parse slash-separated owner parts into NameComponents.
+
+    V5 owner2 rules:
+    - 1 token              -> share surname
+    - 2 tokens, 2nd initial -> FIRST INITIAL (share surname)
+    - 2 tokens, both long   -> DOUBLE FIRST NAME (share surname)
+    - 3+ tokens             -> independent (own LAST FIRST MID...)
+    Suffix from owner1 is repositioned after the last surname.
     """
+    p1_raw = [t for t in parts[0].split() if t]
+    p1_raw, p1_suffix = _extract_suffix(p1_raw)
+    if len(p1_raw) >= 2:
+        p1_last_raw, p1_first_raw = p1_raw[0], p1_raw[1]
+        p1_mid_raw = p1_raw[2:]
+    elif len(p1_raw) == 1:
+        p1_last_raw, p1_first_raw, p1_mid_raw = p1_raw[0], "", []
+    else:
+        return NameComponents()
+    p1_first = _title_case_word(p1_first_raw) if p1_first_raw else ""
+    p1_last = _smart_title_case_name([p1_last_raw]) if p1_last_raw else ""
+    p1_middle = _format_middle_tokens(p1_mid_raw) if p1_mid_raw else ""
+
+    if len(parts) == 1:
+        name_parts = [p for p in [p1_first, p1_middle, p1_last] if p]
+        full = " ".join(name_parts)
+        if p1_suffix:
+            full += f" {p1_suffix}"
+        return NameComponents(
+            full_name=full, p1_first=p1_first, p1_middle=p1_middle, p1_last=p1_last
+        )
+
+    p2_tokens = [t for t in parts[1].split() if t]
+    p2_first = p2_middle = p2_last = ""
+    shared_surname = False
+
+    if not p2_tokens:
+        pass
+    elif len(p2_tokens) == 1:
+        p2_first = _title_case_word(p2_tokens[0])
+        p2_last = p1_last
+        shared_surname = True
+    elif _looks_like_given_plus_initial(p2_tokens):
+        p2_first = _title_case_word(p2_tokens[0])
+        p2_middle = p2_tokens[1].rstrip(".").upper() + "."
+        p2_last = p1_last
+        shared_surname = True
+    elif len(p2_tokens) == 2:
+        p2_first = (
+            f"{_title_case_word(p2_tokens[0])} {_title_case_word(p2_tokens[1])}"
+        )
+        p2_last = p1_last
+        shared_surname = True
+    else:
+        # 3+ tokens: independent
+        if (
+            p1_last
+            and len(p2_tokens) >= 3
+            and p2_tokens[-1].upper() == p1_last.upper()
+        ):
+            p2_first = _title_case_word(p2_tokens[0])
+            p2_last = _smart_title_case_name([p2_tokens[-1]])
+            p2_mid_tokens = p2_tokens[1:-1]
+        else:
+            p2_last = _smart_title_case_name([p2_tokens[0]])
+            p2_first = _title_case_word(p2_tokens[1]) if len(p2_tokens) > 1 else ""
+            p2_mid_tokens = p2_tokens[2:]
+        p2_middle = _format_middle_tokens(p2_mid_tokens) if p2_mid_tokens else ""
+        shared_surname = False
+
+    p1_display = " ".join(p for p in [p1_first, p1_middle] if p)
+    p2_display = " ".join(p for p in [p2_first, p2_middle] if p)
+
+    if p2_display:
+        if shared_surname:
+            full = f"{p1_display} & {p2_display} {p1_last}".strip()
+        else:
+            full = f"{p1_display} {p1_last} & {p2_display} {p2_last}".strip()
+    else:
+        full = f"{p1_display} {p1_last}".strip()
+
+    if p1_suffix:
+        full += f" {p1_suffix}"
+
+    return NameComponents(
+        full_name=full,
+        p1_first=p1_first,
+        p1_middle=p1_middle,
+        p1_last=p1_last,
+        p2_first=p2_first,
+        p2_middle=p2_middle,
+        p2_last=p2_last,
+    )
+
+
+def parse_raw_owner_name(raw: str) -> NameComponents:
+    """Parse a raw county-parcel owner name into structured NameComponents.
+
+    Primary V5 entry point for parcel data.  Returns a NameComponents
+    instance whose fields populate the split name columns of the output CSV.
+
+    Examples::
+
+        "SMITH JOHN W/MARGARET A"
+            -> full="John W. & Margaret A. Smith"
+               p1_first="John", p1_middle="W.", p1_last="Smith"
+               p2_first="Margaret", p2_middle="A.", p2_last="Smith"
+
+        "HARRIS RONALD/TONYA SUE"          (double first name)
+            -> full="Ronald & Tonya Sue Harris"
+               p2_first="Tonya Sue", p2_last="Harris"
+
+        "ALLISON ROY LEE III/KAREN ANNE"   (suffix repositioned)
+            -> full="Roy Lee & Karen Anne Allison III"
+
+        "GRIJALVA CYNTHIA ELENA/DOMINGUEZ JAVIER NOE MORALES"
+            -> full="Cynthia Elena Grijalva & Javier Noe Morales Dominguez"
+               p2_middle="Noe Morales"
+
+        "SMITH FAMILY TRUST"
+            -> full="Smith Family Trust", is_business=True
+    """
+    if not raw:
+        return NameComponents()
+    name = normalize_whitespace(raw.strip())
     if not name:
-        return ""
+        return NameComponents()
 
-    s = normalize_whitespace(name)
-    upper = s.upper()
+    name = _normalize_lp(name)
 
-    # Entity path: preserve word order.
-    if is_trust(upper) or is_government_entity(upper) or is_entity(upper):
-        cleaned = _PUNCTUATION_RE.sub("", upper)
-        return normalize_whitespace(cleaned)
+    if is_trust(name):
+        if "/" in name or "\\" in name:
+            full = _format_trust_with_slash(name)
+        else:
+            full = format_trust_name(name)
+        return NameComponents(full_name=full, is_business=True)
 
-    # Person path.
-    cleaned = _PUNCTUATION_RE.sub("", upper)
-    tokens = [t for t in cleaned.split() if t]
-    tokens = _strip_person_suffixes(tokens)
+    if is_government_entity(name):
+        return NameComponents(
+            full_name=format_government_entity(name), is_business=True
+        )
 
-    # Skip sorting when entity-signal words are present (safety net).
-    if any(t in _ENTITY_SIGNAL_WORDS for t in tokens):
-        return " ".join(tokens)
+    if is_entity(name):
+        return NameComponents(full_name=format_entity_name(name), is_business=True)
 
-    return " ".join(sorted(tokens))
+    protected = re.sub(r"\bC/O\b", "C__SLASH__O", name, flags=re.IGNORECASE)
+    protected = re.sub(r"\bA/C\b", "A__SLASH__C", protected, flags=re.IGNORECASE)
+
+    if "/" in protected or "\\" in protected:
+        parts = re.split(r"[/\\]", protected)
+        parts = [
+            p.replace("C__SLASH__O", "C/O").replace("A__SLASH__C", "A/C").strip()
+            for p in parts
+            if p.strip()
+        ]
+        if len(parts) >= 2:
+            return _parse_slash_to_components(parts)
+        if parts:
+            name = parts[0]
+
+    # Handle & / AND household separators (raw parcel data uses these).
+    # Unlike slash, a 2-token second part here is treated as independent
+    # LAST FIRST rather than a double first name.
+    amp_parts = re.split(r'\s+&\s+|\s+AND\s+', name, flags=re.IGNORECASE)
+    if len(amp_parts) >= 2:
+        return _parse_ampersand_to_components(amp_parts)
+
+    return _parse_single_to_components(name)
+
+
+def _parse_ampersand_to_components(parts: List[str]) -> NameComponents:
+    """Parse & / AND separated owner parts into NameComponents.
+
+    Differs from :func:`_parse_slash_to_components` in the 2-token rule:
+    here a 2-token second part is treated as an independent LAST FIRST owner
+    rather than a double first name, because & in raw parcel data typically
+    lists each owner with their own surname.
+
+    Rules:
+    - 1 token  -> share surname with owner1
+    - 2 tokens -> independent: token[0]=LAST, token[1]=FIRST
+    - 3+ tokens -> independent: token[0]=LAST, token[1]=FIRST, rest=MIDDLE
+    """
+    p1_raw = [t for t in parts[0].split() if t]
+    p1_raw, p1_suffix = _extract_suffix(p1_raw)
+
+    if len(p1_raw) >= 3:
+        p1_last_raw, p1_first_raw, p1_mid_raw = p1_raw[0], p1_raw[1], p1_raw[2:]
+    elif len(p1_raw) == 2:
+        p1_last_raw, p1_first_raw, p1_mid_raw = p1_raw[0], p1_raw[1], []
+    elif len(p1_raw) == 1:
+        p1_last_raw, p1_first_raw, p1_mid_raw = p1_raw[0], "", []
+    else:
+        return NameComponents()
+
+    p1_first = _title_case_word(p1_first_raw) if p1_first_raw else ""
+    p1_last = _smart_title_case_name([p1_last_raw]) if p1_last_raw else ""
+    p1_middle = _format_middle_tokens(p1_mid_raw) if p1_mid_raw else ""
+
+    if len(parts) == 1:
+        name_parts = [p for p in [p1_first, p1_middle, p1_last] if p]
+        full = " ".join(name_parts)
+        if p1_suffix:
+            full += f" {p1_suffix}"
+        return NameComponents(
+            full_name=full, p1_first=p1_first, p1_middle=p1_middle, p1_last=p1_last
+        )
+
+    p2_tokens = [t for t in parts[1].split() if t]
+    p2_first = p2_middle = p2_last = ""
+    shared_surname = False
+
+    if not p2_tokens:
+        pass
+    elif len(p2_tokens) == 1:
+        # Single given name → share surname
+        p2_first = _title_case_word(p2_tokens[0])
+        p2_last = p1_last
+        shared_surname = True
+    elif _looks_like_given_plus_initial(p2_tokens):
+        # e.g. "MARGARET A" → first + middle initial, share surname
+        p2_first = _title_case_word(p2_tokens[0])
+        p2_middle = p2_tokens[1].rstrip(".")[0].upper() + "."
+        p2_last = p1_last
+        shared_surname = True
+    else:
+        # 2+ tokens: independent owner (LAST FIRST [MIDDLE...])
+        p2_raw, _p2_suf = _extract_suffix(p2_tokens)
+        if not p2_raw:
+            pass
+        elif len(p2_raw) == 1:
+            p2_first = _title_case_word(p2_raw[0])
+            p2_last = p1_last
+            shared_surname = True
+        else:
+            p2_last = _smart_title_case_name([p2_raw[0]])
+            p2_first = _title_case_word(p2_raw[1])
+            p2_mid_tokens = p2_raw[2:]
+            p2_middle = _format_middle_tokens(p2_mid_tokens) if p2_mid_tokens else ""
+            shared_surname = p2_last.upper() == p1_last.upper()
+
+    p1_display = " ".join(p for p in [p1_first, p1_middle] if p)
+    p2_display = " ".join(p for p in [p2_first, p2_middle] if p)
+
+    if p2_display:
+        if shared_surname:
+            full = f"{p1_display} & {p2_display} {p1_last}".strip()
+        else:
+            full = f"{p1_display} {p1_last} & {p2_display} {p2_last}".strip()
+    else:
+        full = f"{p1_display} {p1_last}".strip()
+
+    if p1_suffix:
+        full += f" {p1_suffix}"
+
+    return NameComponents(
+        full_name=full,
+        p1_first=p1_first,
+        p1_middle=p1_middle,
+        p1_last=p1_last,
+        p2_first=p2_first,
+        p2_middle=p2_middle,
+        p2_last=p2_last,
+    )
+
+
+# ── trust-with-slash helper ─────────────────────────────────────────────
+
+
+def _format_trust_with_slash(name: str) -> str:
+    """Handle trust names that contain slash-separated co-owners.
+
+    Examples::
+
+        GETZWILLER JOE B/THERESA D TRUST    ->  Joe B. & Theresa D. Getzwiller Trust
+        RATLIEF LOREN L/MARTY K TRUST       ->  Loren L. & Marty K. Ratlief Trust
+        NEWPORT MARK C/LORI J TRUST         ->  Mark C. & Lori J. Newport Trust
+    """
+    upper = name.upper()
+    trust_suffix = "Trust"
+    people_part = name
+
+    for kw in TRUST_KEYWORDS:
+        pos = upper.find(kw)
+        if pos != -1:
+            before = name[:pos].strip()
+            tokens_before = before.split()
+            qualifier_words = []
+            while tokens_before and tokens_before[-1].upper() in (
+                "FAMILY", "FAM", "LIVING", "LIV", "REVOCABLE", "REV",
+                "IRREVOCABLE", "IRREV", "SURVIVOR", "SURVIVORS",
+            ):
+                qualifier_words.insert(0, tokens_before.pop())
+            people_part = " ".join(tokens_before).strip()
+            qualifier = " ".join(qualifier_words).strip()
+            if qualifier:
+                trust_suffix = f"{qualifier.title()} Trust"
+            break
+
+    if not people_part or ("/" not in people_part and "\\" not in people_part):
+        return format_trust_name(name)
+
+    protected = re.sub(r"\bC/O\b", "C__SLASH__O", people_part, flags=re.IGNORECASE)
+    parts = re.split(r"[/\\]", protected)
+    parts = [p.replace("C__SLASH__O", "C/O").strip() for p in parts if p.strip()]
+
+    if len(parts) < 2:
+        return format_trust_name(name)
+
+    nc = _parse_slash_to_components(parts)
+    combined = nc.full_name
+    if not combined:
+        return format_trust_name(name)
+
+    # Strip any person suffix from the combined string before appending Trust
+    suffix_pat = re.compile(
+        r"\s+(?:JR\.?|SR\.?|II|III|IV|V)\s*$", flags=re.IGNORECASE
+    )
+    combined = suffix_pat.sub("", combined).strip()
+
+    if combined.upper().endswith(" TRUST"):
+        return combined
+    return f"{combined} {trust_suffix}"
 
 
 # ── household combination ──────────────────────────────────────────────
 
 
 def combine_household_names(persons: List[str]) -> str:
-    """Combine individually formatted names into a single household label.
+    """Combine formatted names into a single household label using ``&``.
 
-    * All share the same surname::
+    Same-last-name persons are grouped together and rendered with the
+    shared-surname format.  Groups are ordered by the position of their
+    last member in the original input list so same-surname people cluster
+    at the point where the last of them appeared.
 
-        [John Smith, Mary Smith]        ->  John and Mary Smith
-        [John Smith, Mary Smith, Bob Smith]
-                                        ->  John, Mary, and Bob Smith
+    Examples::
 
-    * Mixed surnames::
-
-        [John Smith, Jane Doe]          ->  John Smith and Jane Doe
-
-    * Single person::
-
-        [John Smith]                    ->  John Smith
+        [John Smith, Mary Smith]              ->  John & Mary Smith
+        [John, Mary, Bob Smith]               ->  John, Mary, & Bob Smith
+        [John Smith, Jane Doe]                ->  John Smith & Jane Doe
+        [A B, C D, E Vejar, F G, H Vejar]    ->  A B, C D, F G, E & H Vejar
     """
     if not persons:
         return ""
-
-    # Clean empties.
     persons = [normalize_whitespace(p) for p in persons if normalize_whitespace(p)]
     if not persons:
         return ""
-
     if len(persons) == 1:
         return persons[0]
 
-    # Determine if all share the same last name.
-    split_names = [p.split() for p in persons]
-    last_names = [parts[-1] for parts in split_names if len(parts) >= 2]
+    # Group by last name, tracking position of each member for ordering.
+    groups: dict = {}           # upper-last-name -> list of token-lists
+    group_last_pos: dict = {}   # upper-last-name -> position of last member
 
-    shared_last: str | None = None
-    if last_names and len(last_names) == len(persons):
-        if all(ln == last_names[0] for ln in last_names):
-            shared_last = last_names[0]
+    for idx, person in enumerate(persons):
+        tokens = person.split()
+        key = tokens[-1].upper() if len(tokens) >= 2 else tokens[0].upper()
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(tokens)
+        group_last_pos[key] = idx
 
-    if shared_last:
-        stems = [
-            " ".join(parts[:-1]) if (len(parts) >= 2 and parts[-1] == shared_last)
-            else " ".join(parts)
-            for parts in split_names
-        ]
-        if len(stems) == 2:
-            return f"{stems[0]} and {stems[1]} {shared_last}"
-        # 3+
-        body = ", ".join(stems[:-1])
-        return f"{body}, and {stems[-1]} {shared_last}"
+    # Sort groups by the position of their last member.
+    sorted_keys = sorted(groups.keys(), key=lambda k: group_last_pos[k])
 
-    # Mixed surnames – join full names.
-    if len(persons) == 2:
-        return f"{persons[0]} and {persons[1]}"
-    body = ", ".join(persons[:-1])
-    return f"{body}, and {persons[-1]}"
+    # Render each group into a display segment.
+    segments: list = []
+    for key in sorted_keys:
+        members = groups[key]
+        last_name = members[0][-1]  # display casing from first member
+
+        if len(members) == 1:
+            segments.append(" ".join(members[0]))
+        else:
+            stems = [
+                " ".join(m[:-1]) if len(m) >= 2 else m[0]
+                for m in members
+            ]
+            if len(stems) == 2:
+                segments.append(f"{stems[0]} & {stems[1]} {last_name}")
+            else:
+                seg_body = ", ".join(stems[:-1])
+                segments.append(f"{seg_body}, & {stems[-1]} {last_name}")
+
+    # Join segments.
+    if len(segments) == 1:
+        return segments[0]
+    if len(segments) == 2:
+        return f"{segments[0]} & {segments[1]}"
+    # For 3+ segments use Oxford comma, unless the last segment already
+    # contains " & " which would produce an awkward double-ampersand.
+    if " & " in segments[-1]:
+        return ", ".join(segments)
+    body = ", ".join(segments[:-1])
+    return f"{body}, & {segments[-1]}"
+
+
+# ── comparison normalisation ────────────────────────────────────────────
+
+
+def normalize_name_for_comparison(name: str) -> str:
+    """Produce a normalised key for deduplication comparisons.
+
+    Entities: preserve word order.
+    Persons: sort words alphabetically so order-variants yield the same key.
+    """
+    if not name:
+        return ""
+    s = normalize_whitespace(name)
+    upper = s.upper()
+    if is_trust(upper) or is_government_entity(upper) or is_entity(upper):
+        cleaned = _PUNCTUATION_RE.sub("", upper)
+        return normalize_whitespace(cleaned)
+    cleaned = _PUNCTUATION_RE.sub("", upper)
+    tokens = [t for t in cleaned.split() if t and t not in {"AND", "&"}]
+    tokens = _strip_person_suffixes(tokens)
+    if any(t in _ENTITY_SIGNAL_WORDS for t in tokens):
+        return " ".join(tokens)
+    return " ".join(sorted(tokens))

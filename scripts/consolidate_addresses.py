@@ -22,6 +22,7 @@ import pandas as pd
 
 from utils.config import (
     OUTPUT_COLUMNS,
+    ORIGINAL_COLUMNS,
     FUZZY_MATCH_THRESHOLD,
     COST_PER_PIECE,
     normalize_zip,
@@ -140,7 +141,12 @@ def group_by_exact_match(df: pd.DataFrame) -> Dict[str, List[Dict[str, str]]]:
         # A blank second line matches any second line at the same address; two
         # records with *different* non-empty second lines will still get
         # different keys (and therefore won't be merged in Phase 1).
-        second_line = str(record.get("Title\\Department (2nd line)", "")).strip().lower()
+        # Normalise " and " -> " & " so that C/O lines that differ only in
+        # the connector word don't produce distinct keys.
+        second_line = re.sub(
+            r'\band\b', '&',
+            str(record.get("Title\\Department (2nd line)", "")).strip().lower(),
+        )
         second_key = f"|{second_line}" if second_line else ""
 
         if not street or _is_null_like(street) or _is_undeliverable(street):
@@ -228,8 +234,8 @@ def fuzzy_match_addresses(
                 # second-line values (e.g. different C/O lines).  A blank
                 # second line on either side is fine — the populated value
                 # will survive in the merged record.
-                second_i = str(filtered[i].get("Title\\Department (2nd line)", "")).strip().lower()
-                second_j = str(filtered[j].get("Title\\Department (2nd line)", "")).strip().lower()
+                second_i = re.sub(r'\band\b', '&', str(filtered[i].get("Title\\Department (2nd line)", "")).strip().lower())
+                second_j = re.sub(r'\band\b', '&', str(filtered[j].get("Title\\Department (2nd line)", "")).strip().lower())
                 if second_i and second_j and second_i != second_j:
                     continue
                 addr_i = str(filtered[i].get("Street Address", ""))
@@ -475,7 +481,7 @@ def consolidate_group(records: List[Dict[str, str]]) -> Dict[str, str]:
     # --- Step 11: address from first record ---
     first = records[0]
 
-    return {
+    result: Dict[str, str] = {
         "Data_Source": combined_source,
         "Full Name or Business Company Name": combined_name,
         "Title\\Department (2nd line)": combined_title,
@@ -484,6 +490,19 @@ def consolidate_group(records: List[Dict[str, str]]) -> Dict[str, str]:
         "State": str(first.get("State", "")),
         "Zip": str(first.get("Zip", "")),
     }
+
+    # Aggregate original columns — join unique non-empty values with " | "
+    for col in ORIGINAL_COLUMNS:
+        seen: Set[str] = set()
+        vals: List[str] = []
+        for rec in records:
+            val = str(rec.get(col, "")).strip()
+            if val and val not in seen:
+                vals.append(val)
+                seen.add(val)
+        result[col] = " | ".join(vals)
+
+    return result
 
 
 # =============================================================================
@@ -545,7 +564,7 @@ def consolidate_addresses(
         needs_review_flags.append("Yes" if len(cluster) > 1 else "")
 
     # ---- Build output DataFrame ----
-    result_df = pd.DataFrame(consolidated_records, columns=OUTPUT_COLUMNS)
+    result_df = pd.DataFrame(consolidated_records, columns=OUTPUT_COLUMNS + ORIGINAL_COLUMNS)
     result_df.fillna("", inplace=True)
 
     # ---- Needs_Review / Review_Reason columns ----

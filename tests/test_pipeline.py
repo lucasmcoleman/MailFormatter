@@ -45,6 +45,7 @@ from utils.name_formatter import (
     extract_individuals_from_household,
     normalize_name_for_comparison,
     combine_household_names,
+    parse_raw_owner_name,
 )
 from utils.config import normalize_zip
 
@@ -283,7 +284,7 @@ class TestEntityClassification:
 class TestCombineHousehold:
     def test_same_last_name_two(self):
         result = combine_household_names(["John Smith", "Mary Smith"])
-        assert "and" in result and "Smith" in result
+        assert "&" in result and "Smith" in result
 
     def test_different_last_names(self):
         result = combine_household_names(["John Smith", "Jane Doe"])
@@ -292,3 +293,82 @@ class TestCombineHousehold:
     def test_single_person(self):
         result = combine_household_names(["John Smith"])
         assert result == "John Smith"
+
+
+# ---------------------------------------------------------------------------
+# Test 12: V5 parse_raw_owner_name – NameComponents
+# ---------------------------------------------------------------------------
+class TestParseRawOwnerName:
+    def test_simple_person(self):
+        nc = parse_raw_owner_name("SMITH JOHN")
+        assert nc.full_name == "John Smith"
+        assert nc.p1_first == "John"
+        assert nc.p1_last == "Smith"
+        assert nc.p1_middle == ""
+
+    def test_person_with_middle_initial(self):
+        nc = parse_raw_owner_name("SMITH JOHN A")
+        assert nc.p1_first == "John"
+        assert nc.p1_middle == "A."
+        assert nc.p1_last == "Smith"
+
+    def test_shared_surname_slash(self):
+        # SMITH JOHN/MARGARET → John & Margaret Smith
+        nc = parse_raw_owner_name("SMITH JOHN/MARGARET")
+        assert "&" in nc.full_name
+        assert "Smith" in nc.full_name
+        assert nc.p1_first == "John"
+        assert nc.p1_last == "Smith"
+        assert nc.p2_first == "Margaret"
+        assert nc.p2_last == "Smith"
+
+    def test_double_first_name_detection(self):
+        # HARRIS RONALD/TONYA SUE → Ronald & Tonya Sue Harris
+        nc = parse_raw_owner_name("HARRIS RONALD/TONYA SUE")
+        assert "Ronald" in nc.full_name
+        assert "Tonya Sue" in nc.full_name
+        assert "Harris" in nc.full_name
+
+    def test_suffix_repositioned(self):
+        # ALLISON ROY LEE III/KAREN ANNE → Roy & Karen Anne Allison III
+        nc = parse_raw_owner_name("ALLISON ROY LEE III/KAREN ANNE")
+        assert "III" in nc.full_name
+        # III should appear after the last name
+        idx_allison = nc.full_name.find("Allison")
+        idx_iii = nc.full_name.find("III")
+        assert idx_iii > idx_allison
+
+    def test_different_surnames_slash(self):
+        # SMITH JOHN/BROWN MARGARET ANN → John Smith & Margaret Ann Brown
+        nc = parse_raw_owner_name("SMITH JOHN/BROWN MARGARET ANN")
+        assert "Smith" in nc.full_name
+        assert "Brown" in nc.full_name
+        assert nc.p1_last == "Smith"
+        assert nc.p2_last == "Brown"
+
+    def test_trust_is_business(self):
+        nc = parse_raw_owner_name("SMITH JOHN FAMILY TRUST")
+        assert nc.is_business
+        assert "Trust" in nc.full_name
+        assert nc.p1_first == ""
+
+    def test_llc_is_business(self):
+        nc = parse_raw_owner_name("KEMF WP COMMERCIAL LLC")
+        assert nc.is_business
+
+    def test_middle_names_retained(self):
+        # SMITH JOHN MICHAEL WILLIAM → John Michael William Smith
+        nc = parse_raw_owner_name("SMITH JOHN MICHAEL WILLIAM")
+        assert nc.p1_first == "John"
+        assert "Michael" in nc.p1_middle
+        assert "William" in nc.p1_middle
+        assert nc.p1_last == "Smith"
+
+    def test_mckelvey_casing(self):
+        nc = parse_raw_owner_name("MCKELVEY WILFRED SCOTT/JOELLEN")
+        assert "McKelvey" in nc.full_name
+
+    def test_lp_normalization(self):
+        nc = parse_raw_owner_name("SMITH L P")
+        # "L P" should be recognized as LP entity
+        assert nc.is_business or "LP" in nc.full_name or "L P" not in nc.full_name

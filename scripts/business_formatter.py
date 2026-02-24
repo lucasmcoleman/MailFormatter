@@ -165,7 +165,34 @@ def format_business_data(input_path: str, output_path: str) -> None:
     states = _upper_state_series(df[state_col]) if state_col else pd.Series("", index=df.index)
     zips = df[zip_col].astype(str).apply(normalize_zip) if zip_col else pd.Series("", index=df.index)
 
+    # ---- Original (raw) values before formatting ----
+    def _to_raw(val: str) -> str:
+        s = val.strip()
+        return "" if s.lower() in ("nan", "none") else s
+
+    def _raw_name(row_idx: int) -> str:
+        dba = _to_raw(str(df.at[row_idx, dba_col])) if dba_col is not None else ""
+        company = _to_raw(str(df.at[row_idx, company_col])) if company_col is not None else ""
+        return dba if dba else company
+
+    def _raw_title_dept(row_idx: int) -> str:
+        contact = _to_raw(str(df.at[row_idx, contact_col])) if contact_col is not None else ""
+        title = _to_raw(str(df.at[row_idx, title_col])) if title_col is not None else ""
+        parts = [p for p in (contact, title) if p]
+        return ", ".join(parts)
+
+    orig_owner = pd.Series([_raw_name(i) for i in df.index], index=df.index)
+    orig_titledept = pd.Series([_raw_title_dept(i) for i in df.index], index=df.index)
+    orig_addr = (
+        df[addr_col].astype(str).apply(_to_raw) if addr_col is not None
+        else pd.Series("", index=df.index)
+    )
+    orig_city = df[city_col].astype(str).apply(_to_raw) if city_col else pd.Series("", index=df.index)
+    orig_state = df[state_col].astype(str).apply(_to_raw) if state_col else pd.Series("", index=df.index)
+    orig_zip = df[zip_col].astype(str).apply(_to_raw) if zip_col else pd.Series("", index=df.index)
+
     # ---- Assemble output ----
+    empty_col = pd.Series("", index=df.index)
     out = pd.DataFrame({
         OUTPUT_COLUMNS[0]: "Business",
         OUTPUT_COLUMNS[1]: names,
@@ -174,6 +201,18 @@ def format_business_data(input_path: str, output_path: str) -> None:
         OUTPUT_COLUMNS[4]: cities,
         OUTPUT_COLUMNS[5]: states,
         OUTPUT_COLUMNS[6]: zips,
+        OUTPUT_COLUMNS[7]: empty_col,   # Primary First Name (N/A for businesses)
+        OUTPUT_COLUMNS[8]: empty_col,   # Primary Middle
+        OUTPUT_COLUMNS[9]: empty_col,   # Primary Last Name
+        OUTPUT_COLUMNS[10]: empty_col,  # 2nd Owner First Name
+        OUTPUT_COLUMNS[11]: empty_col,  # 2nd Owner Middle
+        OUTPUT_COLUMNS[12]: empty_col,  # 2nd Owner Last Name
+        'Owner1_original': orig_owner,
+        'TitleDept_original': orig_titledept,
+        'Address1_original': orig_addr,
+        'City_original': orig_city,
+        'State_original': orig_state,
+        'Zip_original': orig_zip,
     })
 
     # Ensure output directory exists

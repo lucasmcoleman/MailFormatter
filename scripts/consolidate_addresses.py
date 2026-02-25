@@ -16,12 +16,14 @@ import argparse
 import os
 import re
 from collections import defaultdict
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
 from utils.config import (
     OUTPUT_COLUMNS,
+    ORIGINAL_COLUMNS,
     FUZZY_MATCH_THRESHOLD,
     COST_PER_PIECE,
     normalize_zip,
@@ -140,7 +142,12 @@ def group_by_exact_match(df: pd.DataFrame) -> Dict[str, List[Dict[str, str]]]:
         # A blank second line matches any second line at the same address; two
         # records with *different* non-empty second lines will still get
         # different keys (and therefore won't be merged in Phase 1).
-        second_line = str(record.get("Title\\Department (2nd line)", "")).strip().lower()
+        # Normalise " and " -> " & " so that C/O lines that differ only in
+        # the connector word don't produce distinct keys.
+        second_line = re.sub(
+            r'\band\b', '&',
+            str(record.get("Title\\Department (2nd line)", "")).strip().lower(),
+        )
         second_key = f"|{second_line}" if second_line else ""
 
         if not street or _is_null_like(street) or _is_undeliverable(street):
@@ -228,8 +235,8 @@ def fuzzy_match_addresses(
                 # second-line values (e.g. different C/O lines).  A blank
                 # second line on either side is fine — the populated value
                 # will survive in the merged record.
-                second_i = str(filtered[i].get("Title\\Department (2nd line)", "")).strip().lower()
-                second_j = str(filtered[j].get("Title\\Department (2nd line)", "")).strip().lower()
+                second_i = re.sub(r'\band\b', '&', str(filtered[i].get("Title\\Department (2nd line)", "")).strip().lower())
+                second_j = re.sub(r'\band\b', '&', str(filtered[j].get("Title\\Department (2nd line)", "")).strip().lower())
                 if second_i and second_j and second_i != second_j:
                     continue
                 addr_i = str(filtered[i].get("Street Address", ""))
@@ -262,6 +269,26 @@ def _effective_last(tokens: List[str]) -> Optional[str]:
     return last if len(last) > 1 else None
 
 
+_FIRST_NAME_SIMILARITY_THRESHOLD = 0.8
+
+
+def _first_names_match(a: str, b: str) -> bool:
+    """Return True if first-name tokens *a* and *b* are the same or very similar.
+
+    Exact match is tried first; then a fuzzy check catches common cross-source
+    spelling variants (e.g. ``ARON`` vs ``AARON``, ``MICHEAL`` vs ``MICHAEL``).
+    Short names (<=2 chars) must match exactly to avoid false positives (e.g.
+    ``AL`` matching ``AJ``).
+    """
+    if a == b:
+        return True
+    # Very short names — require exact match to avoid noise
+    if len(a) <= 2 or len(b) <= 2:
+        return False
+    ratio = SequenceMatcher(None, a, b).ratio()
+    return ratio >= _FIRST_NAME_SIMILARITY_THRESHOLD
+
+
 def _names_same_person(a: str, b: str) -> bool:
     """Return True if formatted names *a* and *b* likely refer to the same person.
 
@@ -270,13 +297,14 @@ def _names_same_person(a: str, b: str) -> bool:
     - "Agustin Q."       == "Agustin Q. Rivas" (partial name vs full name)
     - "Agustin"          == "Agustin Q. Rivas" (just first vs full name)
     - "Albert L. Lee"    == "Albert Lee"        (same first+last, one has middle)
+    - "Aron Jimenez"     == "Aaron Jimenez"     (spelling variant across sources)
     """
     ta = _parse_person_tokens(a)
     tb = _parse_person_tokens(b)
     if not ta or not tb:
         return False
 
-    if ta[0] != tb[0]:          # first names must match
+    if not _first_names_match(ta[0], tb[0]):   # first names must match (fuzzy)
         return False
     if len(ta) == 1 or len(tb) == 1:   # one is just a first name — assume same
         return True
@@ -475,7 +503,7 @@ def consolidate_group(records: List[Dict[str, str]]) -> Dict[str, str]:
     # --- Step 11: address from first record ---
     first = records[0]
 
-    return {
+    result: Dict[str, str] = {
         "Data_Source": combined_source,
         "Full Name or Business Company Name": combined_name,
         "Title\\Department (2nd line)": combined_title,
@@ -484,6 +512,19 @@ def consolidate_group(records: List[Dict[str, str]]) -> Dict[str, str]:
         "State": str(first.get("State", "")),
         "Zip": str(first.get("Zip", "")),
     }
+
+    # Aggregate original columns — join unique non-empty values with " | "
+    for col in ORIGINAL_COLUMNS:
+        seen: Set[str] = set()
+        vals: List[str] = []
+        for rec in records:
+            val = str(rec.get(col, "")).strip()
+            if val and val not in seen:
+                vals.append(val)
+                seen.add(val)
+        result[col] = " | ".join(vals)
+
+    return result
 
 
 # =============================================================================
@@ -529,8 +570,26 @@ def consolidate_addresses(
     needs_review_flags: List[str] = []
 
     for _key, recs in multi_groups.items():
-        consolidated_records.append(consolidate_group(recs))
-        needs_review_flags.append("")  # exact matches are certain
+        merged = consolidate_group(recs)
+        consolidated_records.append(merged)
+
+        # Flag cross-source merges that produced a multi-person household.
+        # When records from different data sources are consolidated and the
+        # resulting name contains "&" (multiple individuals), the name merge
+        # may have combined spelling variants of the same person.  Flag for
+        # human review so these don't slip through unnoticed.
+        sources: Set[str] = set()
+        for rec in recs:
+            src = str(rec.get("Data_Source", "")).strip()
+            if src:
+                sources.add(src)
+        merged_name = str(merged.get("Full Name or Business Company Name", ""))
+        is_cross_source = len(sources) > 1
+        has_multiple_individuals = "&" in merged_name
+        if is_cross_source and has_multiple_individuals:
+            needs_review_flags.append("Cross-source household merge")
+        else:
+            needs_review_flags.append("")
 
     # ---- Phase 2: fuzzy match on singletons ----
     print("  Phase 2: Fuzzy matching singletons...")
@@ -542,10 +601,10 @@ def consolidate_addresses(
 
     for cluster in fuzzy_clusters:
         consolidated_records.append(consolidate_group(cluster))
-        needs_review_flags.append("Yes" if len(cluster) > 1 else "")
+        needs_review_flags.append("Fuzzy address match" if len(cluster) > 1 else "")
 
     # ---- Build output DataFrame ----
-    result_df = pd.DataFrame(consolidated_records, columns=OUTPUT_COLUMNS)
+    result_df = pd.DataFrame(consolidated_records, columns=OUTPUT_COLUMNS + ORIGINAL_COLUMNS)
     result_df.fillna("", inplace=True)
 
     # ---- Needs_Review / Review_Reason columns ----
@@ -555,8 +614,9 @@ def consolidate_addresses(
     review_reasons: List[str] = []
     for i, row in result_df.iterrows():
         reasons: List[str] = []
-        if needs_review_flags[int(i)] == "Yes":
-            reasons.append("Fuzzy address match")
+        flag = needs_review_flags[int(i)]
+        if flag:
+            reasons.append(flag)
         name = str(row[_name_col]).strip()
         addr = str(row[_addr_col]).strip()
         if not name:

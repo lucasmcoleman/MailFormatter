@@ -17,7 +17,7 @@ from typing import List
 
 import pandas as pd
 
-from utils.config import OUTPUT_COLUMNS
+from utils.config import OUTPUT_COLUMNS, ORIGINAL_COLUMNS
 
 
 # =============================================================================
@@ -64,13 +64,15 @@ def combine_sources(
                 f"{label} source ({path}) is missing required columns: {missing}"
             )
 
-        # Keep only the canonical columns (in order) to avoid stacking mismatches
-        df = df[OUTPUT_COLUMNS]
+        # Keep canonical columns + any original columns that are present
+        orig_cols_present = [c for c in ORIGINAL_COLUMNS if c in df.columns]
+        df = df[OUTPUT_COLUMNS + orig_cols_present]
         sources.append(df)
         print(f"  Loaded {label}: {len(df):,} records from {path}")
 
     # Vertically stack
     combined = pd.concat(sources, ignore_index=True)
+    combined.fillna("", inplace=True)
     total_before = len(combined)
     print(f"  Total before dedup: {total_before:,}")
 

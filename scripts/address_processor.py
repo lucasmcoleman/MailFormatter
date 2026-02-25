@@ -398,6 +398,15 @@ def format_parcel_data(input_path: str, output_path: str) -> None:
     garbage_mask = name_empty | addr_null
     out = out[~garbage_mask].reset_index(drop=True)
 
+    # Deduplicate within source: drop rows that share the same formatted
+    # name + address so only one copy per person/address enters Stage 2.
+    before = len(out)
+    out.drop_duplicates(subset=OUTPUT_COLUMNS, keep="first", inplace=True)
+    out.reset_index(drop=True, inplace=True)
+    deduped = before - len(out)
+    if deduped:
+        print(f"  Intra-source duplicates removed: {deduped:,}")
+
     # Ensure output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     out.to_csv(output_path, index=False)

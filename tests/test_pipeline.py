@@ -372,3 +372,35 @@ class TestParseRawOwnerName:
         nc = parse_raw_owner_name("SMITH L P")
         # "L P" should be recognized as LP entity
         assert nc.is_business or "LP" in nc.full_name or "L P" not in nc.full_name
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Cross-Source Name Variant Deduplication
+# ---------------------------------------------------------------------------
+class TestCrossSourceNameDedup:
+    """Verify that spelling variants of the same person across data sources
+    are recognized and merged, not treated as separate household members."""
+
+    def test_aron_aaron_same_person(self):
+        """Aron/Aaron are spelling variants of the same first name.
+        The consolidation dedup should treat them as the same person."""
+        from scripts.consolidate_addresses import _names_same_person
+        assert _names_same_person("Aron Jimenez", "Aaron Jimenez")
+
+    def test_micheal_michael_same_person(self):
+        """Micheal/Michael are common cross-source spelling variants."""
+        from scripts.consolidate_addresses import _names_same_person
+        assert _names_same_person("Micheal Smith", "Michael Smith")
+
+    def test_different_first_names_still_differ(self):
+        """Truly different first names must NOT be treated as the same person."""
+        from scripts.consolidate_addresses import _names_same_person
+        assert not _names_same_person("John Smith", "Jane Smith")
+        assert not _names_same_person("Robert Smith", "Maria Smith")
+
+    def test_short_names_require_exact_match(self):
+        """Very short first names (<=2 chars) require exact match to avoid
+        false positives like 'Al' matching 'AJ'."""
+        from scripts.consolidate_addresses import _names_same_person
+        assert not _names_same_person("Al Smith", "AJ Smith")
+        assert _names_same_person("Al Smith", "Al Smith")

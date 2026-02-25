@@ -161,6 +161,58 @@ def format_consumer_data(input_path: str, output_path: str) -> None:
     states = _upper_state_series(df[state_col]) if state_col else pd.Series("", index=df.index)
     zips = df[zip_col].astype(str).apply(normalize_zip) if zip_col else pd.Series("", index=df.index)
 
+    # ---- Original (raw) values before formatting ----
+    def _to_raw(val: str) -> str:
+        s = val.strip()
+        return "" if s.lower() in ("nan", "none") else s
+
+    if name_col is not None:
+        orig_owner = df[name_col].astype(str).apply(_to_raw)
+    elif first_col is not None and last_col is not None:
+        orig_owner = (
+            df[first_col].astype(str).str.strip() + " " + df[last_col].astype(str).str.strip()
+        ).str.strip().apply(_to_raw)
+    else:
+        orig_owner = pd.Series("", index=df.index)
+
+    orig_titledept = (
+        df[name_line2_col].astype(str).apply(_to_raw)
+        if name_line2_col else pd.Series("", index=df.index)
+    )
+
+    if addr_col is not None:
+        def _raw_addr(idx: int) -> str:
+            line1 = _to_raw(str(df.at[idx, addr_col]))
+            line2 = _to_raw(str(df.at[idx, addr2_col])) if addr2_col is not None else ""
+            if line2:
+                return f"{line1} {line2}" if line1 else line2
+            return line1
+        orig_addr = pd.Series([_raw_addr(i) for i in df.index], index=df.index)
+    else:
+        orig_addr = pd.Series("", index=df.index)
+
+    orig_city = df[city_col].astype(str).apply(_to_raw) if city_col else pd.Series("", index=df.index)
+    orig_state = df[state_col].astype(str).apply(_to_raw) if state_col else pd.Series("", index=df.index)
+    orig_zip = df[zip_col].astype(str).apply(_to_raw) if zip_col else pd.Series("", index=df.index)
+
+    # ---- Split name columns (V5) ----
+    # Consumer data has dedicated first/last columns; middle and 2nd owner not available.
+    def _to_title(val: str) -> str:
+        s = val.strip()
+        return s.title() if s and s.lower() not in ("nan", "none") else ""
+
+    if first_col is not None:
+        p1_firsts = df[first_col].astype(str).apply(_to_title)
+    else:
+        p1_firsts = pd.Series("", index=df.index)
+
+    if last_col is not None:
+        p1_lasts = df[last_col].astype(str).apply(_to_title)
+    else:
+        p1_lasts = pd.Series("", index=df.index)
+
+    empty_col = pd.Series("", index=df.index)
+
     # ---- Assemble output ----
     out = pd.DataFrame({
         OUTPUT_COLUMNS[0]: "Consumer",
@@ -170,7 +222,28 @@ def format_consumer_data(input_path: str, output_path: str) -> None:
         OUTPUT_COLUMNS[4]: cities,
         OUTPUT_COLUMNS[5]: states,
         OUTPUT_COLUMNS[6]: zips,
+        OUTPUT_COLUMNS[7]: p1_firsts,    # Primary First Name
+        OUTPUT_COLUMNS[8]: empty_col,    # Primary Middle (not in consumer source)
+        OUTPUT_COLUMNS[9]: p1_lasts,     # Primary Last Name
+        OUTPUT_COLUMNS[10]: empty_col,   # 2nd Owner First Name
+        OUTPUT_COLUMNS[11]: empty_col,   # 2nd Owner Middle
+        OUTPUT_COLUMNS[12]: empty_col,   # 2nd Owner Last Name
+        'Owner1_original': orig_owner,
+        'TitleDept_original': orig_titledept,
+        'Address1_original': orig_addr,
+        'City_original': orig_city,
+        'State_original': orig_state,
+        'Zip_original': orig_zip,
     })
+
+    # Deduplicate within source: drop rows that share the same formatted
+    # name + address so only one copy per person/address enters Stage 2.
+    before = len(out)
+    out.drop_duplicates(subset=OUTPUT_COLUMNS, keep="first", inplace=True)
+    out.reset_index(drop=True, inplace=True)
+    deduped = before - len(out)
+    if deduped:
+        print(f"  Intra-source duplicates removed: {deduped:,}")
 
     # Ensure output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)

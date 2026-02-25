@@ -2,7 +2,7 @@
 Central configuration module for the mailing list deduplication pipeline.
 
 Contains all shared constants, lookup tables, regex patterns, and utility helpers
-used across the V4 pipeline stages.
+used across the V5 pipeline stages.
 """
 
 import re
@@ -39,6 +39,22 @@ OUTPUT_COLUMNS: list[str] = [
     'City',
     'State',
     'Zip',
+    # V5 split name columns (populated for personal names; empty for businesses)
+    'Primary First Name',
+    'Primary Middle',
+    'Primary Last Name',
+    '2nd Owner First Name',
+    '2nd Owner Middle',
+    '2nd Owner Last Name',
+]
+
+ORIGINAL_COLUMNS: list[str] = [
+    'Owner1_original',
+    'TitleDept_original',
+    'Address1_original',
+    'City_original',
+    'State_original',
+    'Zip_original',
 ]
 
 
@@ -249,7 +265,7 @@ COMPANY_INDICATORS: list[str] = [
 
 PERSON_SUFFIXES: list[str] = [
     'JR', 'JR.', 'SR', 'SR.',
-    'II', 'III', 'IV', 'V',
+    'II', 'III', 'IV',
     'MD', 'M.D.', 'PHD', 'PH.D.',
     'ESQ', 'ESQ.',
 ]

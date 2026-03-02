@@ -219,9 +219,11 @@ UNIT_NUMBER_PATTERN: re.Pattern[str] = re.compile(
 # =============================================================================
 
 TRUST_KEYWORDS: list[str] = [
-    'TRUST', 'TRUSTEE', 'TRUSTS', 'TR',
+    'TRUST', 'TRUSTEE', 'TRUSTS',
     'LIVING TRUST', 'REVOCABLE TRUST', 'FAMILY TRUST',
     'TR UA', 'TR U/A',
+    'CO-TRS', 'CO-TR',
+    'TRS', 'TR',
 ]
 
 GOVERNMENT_KEYWORDS: list[str] = [

@@ -373,6 +373,93 @@ def _expand_slash_names(names: List[str]) -> List[str]:
     return expanded
 
 
+def _last_name_tokens(rec: Dict[str, str]) -> Set[str]:
+    """Return the set of uppercase last-name tokens found in *rec*'s formatted name."""
+    name = str(rec.get("Full Name or Business Company Name", "")).strip()
+    if not name or _is_null_like(name):
+        return set()
+    individuals = extract_individuals_from_household(name)
+    tokens: Set[str] = set()
+    for ind in individuals:
+        ind_toks = _parse_person_tokens(ind)
+        last = _effective_last(ind_toks)
+        if last:
+            tokens.add(last)
+    return tokens
+
+
+def _cluster_persons_by_last_name(
+    records: List[Dict[str, str]],
+) -> List[List[Dict[str, str]]]:
+    """Cluster person records into groups that share at least one last-name token.
+
+    Records with no detectable last name are merged into the first cluster so
+    that no record is ever dropped.
+    """
+    n = len(records)
+    if n <= 1:
+        return [records]
+    uf = UnionFind(n)
+    token_sets = [_last_name_tokens(r) for r in records]
+    for i in range(n):
+        for j in range(i + 1, n):
+            # Compatible when they share a last-name token, or when either
+            # name has no detectable last name (ambiguous — keep together).
+            if (not token_sets[i] or not token_sets[j]
+                    or token_sets[i] & token_sets[j]):
+                uf.union(i, j)
+    clusters: List[List[Dict[str, str]]] = []
+    for _root, members in uf.clusters().items():
+        clusters.append([records[m] for m in members])
+    return clusters
+
+
+def _split_group_for_output(
+    records: List[Dict[str, str]],
+) -> List[List[Dict[str, str]]]:
+    """Split a same-address group into sub-groups that each produce one output row.
+
+    Rules
+    -----
+    1. Entity-like records (trusts, corps, govt) always separate from
+       person-like records so neither is silently dropped.
+    2. For person records that span multiple data sources, check whether
+       their names share a last name.  If not, they are likely different
+       households at the same address (e.g. owner vs. tenant) and should
+       each receive their own mailer.
+    3. Same-source person records always consolidate together unchanged.
+    """
+    if len(records) <= 1:
+        return [records]
+
+    entity_recs = [
+        r for r in records
+        if _classify_name(str(r.get("Full Name or Business Company Name", "")).strip())
+        in ("trust", "government", "entity")
+    ]
+    person_recs = [
+        r for r in records
+        if _classify_name(str(r.get("Full Name or Business Company Name", "")).strip())
+        == "person"
+    ]
+
+    result: List[List[Dict[str, str]]] = []
+
+    if entity_recs:
+        result.append(entity_recs)
+
+    if person_recs:
+        sources = {str(r.get("Data_Source", "")).strip() for r in person_recs}
+        if len(sources) <= 1:
+            # Same source — consolidate as usual.
+            result.append(person_recs)
+        else:
+            # Cross-source — split into name-compatible clusters.
+            result.extend(_cluster_persons_by_last_name(person_recs))
+
+    return result if result else [records]
+
+
 def consolidate_group(records: List[Dict[str, str]]) -> Dict[str, str]:
     """Merge a group of records sharing the same (or similar) address.
 
@@ -411,9 +498,10 @@ def consolidate_group(records: List[Dict[str, str]]) -> Dict[str, str]:
         else:
             person_like.append(rec)
 
-    # --- Step 2: mixed safety ---
+    # --- Step 2: mixed safety (should not be reached after _split_group_for_output
+    #     pre-processing, but kept as a safety net) ---
     if entity_like and person_like:
-        return consolidate_group(entity_like) if entity_like else consolidate_group(person_like)
+        return consolidate_group(entity_like)
 
     # --- Collect all raw names ---
     all_names: List[str] = []
@@ -570,26 +658,24 @@ def consolidate_addresses(
     needs_review_flags: List[str] = []
 
     for _key, recs in multi_groups.items():
-        merged = consolidate_group(recs)
-        consolidated_records.append(merged)
+        sub_groups = _split_group_for_output(recs)
+        for sub_group in sub_groups:
+            merged = consolidate_group(sub_group)
+            consolidated_records.append(merged)
 
-        # Flag cross-source merges that produced a multi-person household.
-        # When records from different data sources are consolidated and the
-        # resulting name contains "&" (multiple individuals), the name merge
-        # may have combined spelling variants of the same person.  Flag for
-        # human review so these don't slip through unnoticed.
-        sources: Set[str] = set()
-        for rec in recs:
-            src = str(rec.get("Data_Source", "")).strip()
-            if src:
-                sources.add(src)
-        merged_name = str(merged.get("Full Name or Business Company Name", ""))
-        is_cross_source = len(sources) > 1
-        has_multiple_individuals = "&" in merged_name
-        if is_cross_source and has_multiple_individuals:
-            needs_review_flags.append("Cross-source household merge")
-        else:
-            needs_review_flags.append("")
+            # Flag cross-source merges that produced a multi-person household.
+            sources: Set[str] = set()
+            for rec in sub_group:
+                src = str(rec.get("Data_Source", "")).strip()
+                if src:
+                    sources.add(src)
+            merged_name = str(merged.get("Full Name or Business Company Name", ""))
+            is_cross_source = len(sources) > 1
+            has_multiple_individuals = "&" in merged_name
+            if is_cross_source and has_multiple_individuals:
+                needs_review_flags.append("Cross-source household merge")
+            else:
+                needs_review_flags.append("")
 
     # ---- Phase 2: fuzzy match on singletons ----
     print("  Phase 2: Fuzzy matching singletons...")
@@ -600,8 +686,11 @@ def consolidate_addresses(
     print(f"    Fuzzy clusters formed: {fuzzy_merged:,}")
 
     for cluster in fuzzy_clusters:
-        consolidated_records.append(consolidate_group(cluster))
-        needs_review_flags.append("Fuzzy address match" if len(cluster) > 1 else "")
+        is_fuzzy_multi = len(cluster) > 1
+        sub_groups = _split_group_for_output(cluster) if is_fuzzy_multi else [cluster]
+        for sub_group in sub_groups:
+            consolidated_records.append(consolidate_group(sub_group))
+            needs_review_flags.append("Fuzzy address match" if is_fuzzy_multi else "")
 
     # ---- Build output DataFrame ----
     result_df = pd.DataFrame(consolidated_records, columns=OUTPUT_COLUMNS + ORIGINAL_COLUMNS)
@@ -623,6 +712,11 @@ def consolidate_addresses(
             reasons.append("Empty name")
         if not addr:
             reasons.append("Empty address")
+        city = str(row.get("City", "")).strip()
+        state = str(row.get("State", "")).strip()
+        zip_val = str(row.get("Zip", "")).strip()
+        if not city or not state or not zip_val:
+            reasons.append("Missing address field (City/State/Zip)")
         if "," in name:
             reasons.append("Possible unparsed name (LAST, FIRST)")
         if name.lower().startswith("parcel "):

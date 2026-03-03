@@ -227,16 +227,19 @@ TRUST_KEYWORDS: list[str] = [
 ]
 
 GOVERNMENT_KEYWORDS: list[str] = [
+    # Multi-word phrases — substring matching is safe because they're specific.
     'CITY OF', 'TOWN OF', 'COUNTY OF', 'STATE OF',
-    'DEPARTMENT', 'DEPT', 'BOARD OF',
+    'BOARD OF',
     'SCHOOL DISTRICT', 'UNIFIED SCHOOL DISTRICT',
     'FIRE DISTRICT', 'WATER DISTRICT', 'IRRIGATION DISTRICT',
     'UNITED STATES', 'U S GOVERNMENT',
-    'BUREAU', 'COMMISSION',
 ]
 
-# Short government keywords that must match as whole words (not substrings)
+# Single-word keywords checked as whole words only (not substrings).
+# This prevents false positives like "ACME DEPARTMENT STORE", "TRAVEL BUREAU",
+# or "COMMISSION HOMES INC" from being classified as government entities.
 GOVERNMENT_WORD_KEYWORDS: list[str] = [
+    'DEPARTMENT', 'DEPT', 'BUREAU', 'COMMISSION',
     'DISTRICT', 'AUTHORITY', 'DIVISION', 'AGENCY', 'COUNCIL',
 ]
 

@@ -30,6 +30,7 @@ Key safety invariants enforced here:
   canonical representative of each cluster.
 """
 
+import re
 from difflib import SequenceMatcher
 from typing import Dict, List
 
@@ -170,9 +171,8 @@ def addresses_are_similar(
     # leading number but score 0.895 on SequenceMatcher because the long
     # shared suffix dominates.  If both addresses begin with a numeric
     # token, require an exact match before allowing fuzzy scoring.
-    import re as _re
-    _num1 = _re.match(r'^(\d+)', base1)
-    _num2 = _re.match(r'^(\d+)', base2)
+    _num1 = re.match(r'^(\d+)', base1)
+    _num2 = re.match(r'^(\d+)', base2)
     if _num1 and _num2 and _num1.group(1) != _num2.group(1):
         return False
 
@@ -299,51 +299,60 @@ def fuzzy_match_entity_names(
             seen_raw.add(name)
             unique_names.append(name)
 
+    n = len(unique_names)
+
     # Pre-compute normalized forms for comparison.
     normalized: Dict[str, str] = {
         name: normalize_name_for_comparison(name) for name in unique_names
     }
 
-    # Track which names have been assigned to a cluster.
-    clustered: set = set()
-    clusters: List[List[str]] = []
+    # Union-Find for transitive clustering (A≈B and B≈C → A,B,C in same cluster
+    # even if A and C weren't directly compared).
+    parent = list(range(n))
+    rank = [0] * n
 
-    for name in unique_names:
-        if name in clustered:
-            continue
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
-        # Start a new cluster seeded with this name.
-        cluster = [name]
-        clustered.add(name)
-        norm_a = normalized[name]
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra == rb:
+            return
+        if rank[ra] < rank[rb]:
+            ra, rb = rb, ra
+        parent[rb] = ra
+        if rank[ra] == rank[rb]:
+            rank[ra] += 1
 
+    for i in range(n):
+        norm_a = normalized[unique_names[i]]
         if not norm_a:
-            clusters.append(cluster)
             continue
-
-        for other in unique_names:
-            if other in clustered:
-                continue
-
-            norm_b = normalized[other]
+        for j in range(i + 1, n):
+            norm_b = normalized[unique_names[j]]
             if not norm_b:
                 continue
-
             ratio = SequenceMatcher(None, norm_a, norm_b).ratio()
             if ratio >= threshold:
-                cluster.append(other)
-                clustered.add(other)
+                _union(i, j)
 
-        clusters.append(cluster)
+    # Group names by cluster root.
+    from collections import defaultdict as _defaultdict
+    cluster_map: Dict[int, List[str]] = _defaultdict(list)
+    for i, name in enumerate(unique_names):
+        cluster_map[_find(i)].append(name)
 
     # Build the mapping: each raw name -> canonical representative.
     mapping: Dict[str, str] = {}
 
-    for cluster in clusters:
+    for cluster in cluster_map.values():
         # Select canonical: most words first, then longest string as tiebreaker.
         canonical_raw = max(
             cluster,
-            key=lambda n: (len(n.split()), len(n)),
+            key=lambda name_: (len(name_.split()), len(name_)),
         )
         canonical = format_entity_name(canonical_raw)
 

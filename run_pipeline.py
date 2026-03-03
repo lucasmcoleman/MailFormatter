@@ -161,12 +161,18 @@ def run_pipeline(
         print("  ERROR: No formatted source files found. Cannot combine.")
         raise SystemExit(1)
 
-    # Create stub files for any missing formatted sources so combine won't fail
+    # Create stub files for any missing formatted sources so combine won't fail.
+    # Also warn when an existing formatted file is empty (zero data rows) —
+    # this can happen when a formatter crashed on a previous run and left a stub.
     for path in [consumer_output, business_output, parcel_output]:
         if not os.path.isfile(path):
+            print(f"  WARNING: {path} was not produced — creating empty stub.")
             stub = pd.DataFrame(columns=OUTPUT_COLUMNS)
             stub.to_csv(path, index=False)
-            print(f"  Created empty stub: {path}")
+        else:
+            row_count = len(pd.read_csv(path, dtype=str, keep_default_na=False))
+            if row_count == 0:
+                print(f"  WARNING: {path} contains 0 rows — source data may be missing or the formatter failed.")
 
     combine_sources(consumer_output, business_output, parcel_output, combined_output)
     combined_count = len(pd.read_csv(combined_output, dtype=str, keep_default_na=False))
@@ -202,7 +208,6 @@ def run_pipeline(
         print(f"\n  VALIDATION FAILED with {len(errors)} error(s).")
         print("  Review the validation report for details:")
         print(f"    {validation_report}")
-        raise SystemExit(1)
 
     # =====================================================================
     # Stage 5: Generate Statistics
@@ -223,6 +228,10 @@ def run_pipeline(
         output_path=stats_output,
     )
     print(f"  Stage 5 elapsed: {_fmt_elapsed(time.time() - stage_start)}")
+
+    # Exit with code 1 if validation found errors (after stats are written).
+    if errors:
+        raise SystemExit(1)
 
     # =====================================================================
     # Final Summary

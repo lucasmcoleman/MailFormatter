@@ -157,7 +157,8 @@ def group_by_exact_match(df: pd.DataFrame) -> Dict[str, List[Dict[str, str]]]:
             po = extract_po_box(street)
             city_u = city.upper()
             state_u = state.upper()
-            key = f"{po}|{city_u}|{state_u}{second_key}"
+            zip5 = normalize_zip(zip_code)
+            key = f"{po}|{city_u}|{state_u}|{zip5}{second_key}"
         else:
             key = create_address_key(street, city, state, zip_code) + second_key
 
@@ -346,15 +347,22 @@ def _richer_name(a: str, b: str) -> str:
 
 
 def _classify_name(name: str) -> str:
-    """Return 'trust', 'government', 'entity', or 'person'."""
+    """Return 'trust', 'government', 'entity', or 'person'.
+
+    Priority: trust > entity > government > person.
+    Entity is checked before government so that names like "Travel Bureau LLC"
+    are correctly classified as entities rather than government bodies — the
+    presence of a corporate indicator (LLC, INC, etc.) takes precedence over
+    any government-sounding word.
+    """
     if not name or _is_null_like(name):
         return "person"
     if is_trust(name):
         return "trust"
-    if is_government_entity(name):
-        return "government"
     if is_entity(name):
         return "entity"
+    if is_government_entity(name):
+        return "government"
     return "person"
 
 

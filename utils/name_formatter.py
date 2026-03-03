@@ -375,7 +375,9 @@ def is_entity(name: str) -> bool:
     if not name:
         return False
     upper = _upper(name)
-    padded = f" {upper} "
+    # Strip punctuation so "ABC, LLC." is treated the same as "ABC LLC".
+    clean = re.sub(r'[.,;]+', ' ', upper)
+    padded = f" {normalize_whitespace(clean)} "
     indicators = [c.upper() for c in COMPANY_INDICATORS]
     return any(f" {ind} " in padded for ind in indicators)
 
@@ -490,10 +492,9 @@ def format_government_entity(name: str) -> str:
         return f"{body_titled} Dept"
     words = raw.split()
     out: List[str] = []
-    lowercase_particles = {"OF", "THE", "AND", "FOR"}
     for w in words:
         uw = w.upper()
-        if uw in lowercase_particles:
+        if uw in _ENTITY_LOWERCASE_WORDS:
             out.append(w.lower())
         else:
             out.append(_title_case_word(w))

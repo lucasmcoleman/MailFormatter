@@ -404,3 +404,47 @@ class TestCrossSourceNameDedup:
         from scripts.consolidate_addresses import _names_same_person
         assert not _names_same_person("Al Smith", "AJ Smith")
         assert _names_same_person("Al Smith", "Al Smith")
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Classification False Positives
+# ---------------------------------------------------------------------------
+class TestClassificationFalsePositives:
+    """Ensure classifiers do not misidentify common businesses as government."""
+
+    def test_corporate_indicator_wins_over_government_keyword(self):
+        """When a name has a corporate indicator (LLC, INC) AND a government-sounding
+        word, the classification pipeline must return 'entity', not 'government'.
+        is_entity() runs before is_government_entity() in _classify_name."""
+        from scripts.consolidate_addresses import _classify_name
+        assert _classify_name("TRAVEL BUREAU LLC") == "entity"
+        assert _classify_name("DEPARTMENT STORE HOLDINGS LLC") == "entity"
+        assert _classify_name("COMMISSION HOMES INC") == "entity"
+
+    def test_government_keywords_still_match_real_entities(self):
+        """Government keyword detection still works for real government names."""
+        assert is_government_entity("ARIZONA DEPT OF TRANSPORTATION")
+        assert is_government_entity("PHOENIX FIRE BUREAU")
+
+    def test_real_government_entities_still_detected(self):
+        """Positive cases must still pass after the fix."""
+        assert is_government_entity("STATE OF ARIZONA")
+        assert is_government_entity("CITY OF PHOENIX")
+        assert is_government_entity("PINAL COUNTY DEPT OF TRANSPORTATION")
+        assert is_government_entity("ARIZONA WATER DISTRICT")
+
+    def test_entity_with_trailing_punctuation(self):
+        """'ABC, LLC.' and 'SMITH INC.' must be recognized as entities."""
+        assert is_entity("ABC, LLC.")
+        assert is_entity("SMITH INC.")
+        assert is_entity("JONES CORP.")
+
+    def test_person_not_entity(self):
+        """Plain person names must not be classified as entities."""
+        assert not is_entity("SMITH JOHN")
+        assert not is_entity("JOHN SMITH")
+
+    def test_trust_not_triggered_by_unrelated_words(self):
+        """Words that contain trust-keyword substrings must not match."""
+        assert not is_trust("COUNTRY CLUB")
+        assert not is_trust("TRUCK ENTERPRISES")

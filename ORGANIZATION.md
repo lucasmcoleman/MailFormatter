@@ -1,11 +1,11 @@
-# MailFormatter V4 — Project Organization
+# MailFormatter V5 — Project Organization
 
 ---
 
 ## Folder Structure
 
 ```
-MailFormatter_V4/
+MailFormatter_V5/
 │
 ├── QUICKSTART.md            # Start here — 5-minute setup guide
 ├── README.md                # Complete user documentation
@@ -31,6 +31,7 @@ MailFormatter_V4/
 │   ├── name_formatter.py        # Entity classification, LAST FIRST reversal
 │   ├── address_formatter.py     # PO Box extraction, street normalization
 │   ├── matching_utils.py        # Fuzzy matching with safety guards
+│   ├── file_reader.py           # CSV/XLSX reader, column auto-detection
 │   └── __init__.py
 │
 ├── tests/                   # Test suite

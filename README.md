@@ -1,4 +1,4 @@
-# MailFormatter V4 — Mailing List Deduplication Pipeline
+# MailFormatter V5 — Mailing List Deduplication Pipeline
 
 Consolidates Consumer, Business, and Parcel (property owner) records from overlapping county data sources into a single, deduplicated mailing list ready for human review.
 
@@ -422,7 +422,7 @@ Warnings are expected and do not fail the pipeline. Review `output/validation_re
 ## Project Structure
 
 ```
-MailFormatter_V4/
+MailFormatter_V5/
 ├── QUICKSTART.md              # 5-minute setup guide (start here)
 ├── README.md                  # This file
 ├── CLAUDE.md                  # Developer/maintainer reference
@@ -442,7 +442,8 @@ MailFormatter_V4/
 │   ├── config.py              # Constants, thresholds, mappings
 │   ├── name_formatter.py      # Name classification and formatting
 │   ├── address_formatter.py   # Address normalization
-│   └── matching_utils.py      # Fuzzy matching with safety guards
+│   ├── matching_utils.py      # Fuzzy matching with safety guards
+│   └── file_reader.py         # CSV/XLSX reader, column auto-detection
 │
 ├── tests/
 │   └── test_pipeline.py       # 39 tests

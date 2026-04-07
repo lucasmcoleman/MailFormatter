@@ -1,4 +1,4 @@
-MailFormatter_V5/
+MailFormatter/
 |
 +-- Documentation (5 files)
 |   +-- QUICKSTART.md            # 5-minute setup guide (start here)

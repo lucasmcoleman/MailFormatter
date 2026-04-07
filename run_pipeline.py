@@ -1,5 +1,5 @@
 """
-MAIL FORMATTER V5 -- MASTER PIPELINE
+MAIL FORMATTER -- MASTER PIPELINE
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Orchestrates the full mailing list deduplication pipeline from raw source
 files through formatting, combining, consolidation, validation, and
@@ -94,7 +94,7 @@ def run_pipeline(
     pipeline_start = time.time()
 
     print("=" * 70)
-    print("MAIL FORMATTER V5 - MASTER PIPELINE")
+    print("MAIL FORMATTER - MASTER PIPELINE")
     print("=" * 70)
     print()
 
@@ -265,7 +265,7 @@ def run_pipeline(
 def main() -> None:
     """Parse arguments and launch the pipeline."""
     parser = argparse.ArgumentParser(
-        description="MAIL FORMATTER V5 - Master Pipeline Orchestrator",
+        description="MAIL FORMATTER - Master Pipeline Orchestrator",
     )
     parser.add_argument(
         "--consumer",

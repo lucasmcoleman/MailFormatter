@@ -1,4 +1,4 @@
-MailFormatter_V4/
+MailFormatter_V5/
 |
 +-- Documentation (5 files)
 |   +-- QUICKSTART.md            # 5-minute setup guide (start here)
@@ -23,12 +23,13 @@ MailFormatter_V4/
 |   +-- validate_output.py       # Stage 4: Validation and review flagging
 |   \-- generate_stats.py        # Stage 5: Statistics report
 |
-+-- utils/ (4 modules)           # Shared formatting & matching logic
++-- utils/ (5 modules)           # Shared formatting & matching logic
 |   +-- __init__.py
 |   +-- config.py                # Constants, thresholds, mappings
 |   +-- name_formatter.py        # 5 entity types, LAST FIRST reversal
 |   +-- address_formatter.py     # PO Box extraction, normalization
-|   \-- matching_utils.py        # Fuzzy matching with safety guards
+|   +-- matching_utils.py        # Fuzzy matching with safety guards
+|   \-- file_reader.py           # CSV/XLSX reader, column auto-detection
 |
 +-- tests/ (1 suite)             # Test suite (39 tests)
 |   +-- __init__.py
@@ -49,7 +50,7 @@ MailFormatter_V4/
     \-- stats.txt                # Stage 5 output
 
 ------------------------------------------------------------
-Total source files:  15 Python modules
+Total source files:  16 Python modules
 Test coverage:       39 tests, 15 edge case categories
 Documentation:       5 guides (Quick Start, User, Developer, Organization, Structure)
 ------------------------------------------------------------

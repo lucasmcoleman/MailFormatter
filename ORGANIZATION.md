@@ -1,11 +1,11 @@
-# MailFormatter V5 — Project Organization
+# MailFormatter — Project Organization
 
 ---
 
 ## Folder Structure
 
 ```
-MailFormatter_V5/
+MailFormatter/
 │
 ├── QUICKSTART.md            # Start here — 5-minute setup guide
 ├── README.md                # Complete user documentation

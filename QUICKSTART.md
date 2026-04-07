@@ -43,7 +43,7 @@ pip install -r requirements.txt
 Copy your three data files into the `ToBeProcessed/` folder inside the project:
 
 ```
-MailFormatter_V5/
+MailFormatter/
 └── ToBeProcessed/
     ├── Consumer.csv      ← Data Axle consumer export
     ├── Business.csv      ← Data Axle business export
@@ -72,10 +72,10 @@ The sample files contain 15 fictional records and are designed to exercise conso
 
 ## Step 3 — Run the Pipeline
 
-> **Important:** You must run this command from inside the `MailFormatter_V5/` folder. The pipeline uses relative paths that depend on your working directory — running it from a parent folder will cause file-not-found errors.
+> **Important:** You must run this command from inside the `MailFormatter/` folder. The pipeline uses relative paths that depend on your working directory — running it from a parent folder will cause file-not-found errors.
 
 ```bash
-cd MailFormatter_V5
+cd MailFormatter
 python run_pipeline.py
 ```
 
@@ -148,7 +148,7 @@ python -m scripts.consolidate_addresses
 
 **"No such file or directory"**
 → Check that your files exist in `ToBeProcessed/` with the correct filenames.
-→ Make sure you ran `cd MailFormatter_V5` before `python run_pipeline.py`.
+→ Make sure you ran `cd MailFormatter` before `python run_pipeline.py`.
 
 **"ModuleNotFoundError: No module named 'pandas'"**
 → Run `pip install pandas openpyxl` and try again.

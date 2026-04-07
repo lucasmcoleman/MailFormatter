@@ -1,4 +1,4 @@
-# MailFormatter V5 — Mailing List Deduplication Pipeline
+# MailFormatter — Mailing List Deduplication Pipeline
 
 Consolidates Consumer, Business, and Parcel (property owner) records from overlapping county data sources into a single, deduplicated mailing list ready for human review.
 
@@ -422,7 +422,7 @@ Warnings are expected and do not fail the pipeline. Review `output/validation_re
 ## Project Structure
 
 ```
-MailFormatter_V5/
+MailFormatter/
 ├── QUICKSTART.md              # 5-minute setup guide (start here)
 ├── README.md                  # This file
 ├── CLAUDE.md                  # Developer/maintainer reference

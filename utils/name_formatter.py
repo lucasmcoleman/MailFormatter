@@ -982,6 +982,62 @@ def _parse_single_to_components(raw: str) -> NameComponents:
     )
 
 
+def _parse_single_firstlast_to_components(raw: str) -> NameComponents:
+    """Parse a person name already in FIRST [MIDDLE…] LAST order.
+
+    Used when the input is title-case (not ALL-CAPS), indicating the name
+    has already been formatted in natural reading order rather than the
+    county-assessor LAST FIRST convention.
+
+    Compound last names are detected by scanning backward for particles
+    (de, del, van, von, la, …) so "Ramon de la Cruz" → first=Ramon,
+    last=de la Cruz.
+
+    Examples::
+
+        Esther Fields            -> first=Esther, last=Fields
+        Esther J Fields          -> first=Esther, middle=J., last=Fields
+        Ramon de la Cruz         -> first=Ramon, last=de la Cruz
+        John Michael William Smith -> first=John, middle=Michael William, last=Smith
+    """
+    tokens = [t for t in raw.split() if t]
+    if not tokens:
+        return NameComponents()
+    tokens, suffix = _extract_suffix(tokens)
+    if not tokens:
+        return NameComponents(full_name=suffix)
+
+    if len(tokens) == 1:
+        name = _title_case_word(tokens[0])
+        full = f"{name} {suffix}".strip() if suffix else name
+        return NameComponents(full_name=full, p1_first=name)
+
+    # Scan backward from the end to detect compound last names.
+    # "Ramon de la Cruz" → last_start = 1 (at "de")
+    _PARTICLE_UPPER = _SIMPLE_NAME_PREFIXES | _SECONDARY_NAME_PARTS
+    last_start = len(tokens) - 1
+    while last_start > 1 and tokens[last_start - 1].upper() in _PARTICLE_UPPER:
+        last_start -= 1
+
+    # Ensure at least one first-name token.
+    if last_start < 1:
+        last_start = 1
+
+    first_tokens = tokens[:last_start]
+    last_tokens = tokens[last_start:]
+
+    p1_first = _title_case_word(first_tokens[0])
+    p1_middle = _format_middle_tokens(first_tokens[1:]) if len(first_tokens) > 1 else ""
+    p1_last = _smart_title_case_name(last_tokens)
+
+    full = " ".join(p for p in [p1_first, p1_middle, p1_last] if p)
+    if suffix:
+        full += f" {suffix}"
+    return NameComponents(
+        full_name=full, p1_first=p1_first, p1_middle=p1_middle, p1_last=p1_last
+    )
+
+
 def _parse_slash_to_components(parts: List[str]) -> NameComponents:
     """Parse slash-separated owner parts into NameComponents.
 
@@ -1127,6 +1183,12 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
     if is_entity(name):
         return NameComponents(full_name=format_entity_name(name), is_business=True)
 
+    # Detect whether the input is raw ALL-CAPS parcel data (LAST FIRST order)
+    # or pre-formatted title-case data (FIRST LAST order).  Mixed/title-case
+    # names use the FIRST-LAST parser to avoid reversing an already-correct
+    # name like "Esther J Fields" into "J. Fields Esther".
+    is_raw_caps = name == name.upper() and any(c.isalpha() for c in name)
+
     protected = re.sub(r"\bC/O\b", "C__SLASH__O", name, flags=re.IGNORECASE)
     protected = re.sub(r"\bA/C\b", "A__SLASH__C", protected, flags=re.IGNORECASE)
 
@@ -1138,7 +1200,21 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
             if p.strip()
         ]
         if len(parts) >= 2:
-            return _parse_slash_to_components(parts)
+            if is_raw_caps:
+                return _parse_slash_to_components(parts)
+            # Title-case slash: parse each part independently in FIRST LAST order.
+            nc1 = _parse_single_firstlast_to_components(parts[0])
+            if len(parts) == 2:
+                nc2 = _parse_single_firstlast_to_components(parts[1])
+                combined = combine_household_names(
+                    [n for n in [nc1.full_name, nc2.full_name] if n]
+                )
+                return NameComponents(
+                    full_name=combined,
+                    p1_first=nc1.p1_first, p1_middle=nc1.p1_middle, p1_last=nc1.p1_last,
+                    p2_first=nc2.p1_first, p2_middle=nc2.p1_middle, p2_last=nc2.p1_last,
+                )
+            return nc1
         if parts:
             name = parts[0]
 
@@ -1147,9 +1223,24 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
     # LAST FIRST rather than a double first name.
     amp_parts = re.split(r'\s+&\s+|\s+AND\s+', name, flags=re.IGNORECASE)
     if len(amp_parts) >= 2:
-        return _parse_ampersand_to_components(amp_parts)
+        if is_raw_caps:
+            return _parse_ampersand_to_components(amp_parts)
+        # Title-case ampersand: parse each part in FIRST LAST order.
+        parsed = [_parse_single_firstlast_to_components(p.strip()) for p in amp_parts]
+        combined = combine_household_names(
+            [nc.full_name for nc in parsed if nc.full_name]
+        )
+        nc1 = parsed[0]
+        nc2 = parsed[1] if len(parsed) > 1 else NameComponents()
+        return NameComponents(
+            full_name=combined,
+            p1_first=nc1.p1_first, p1_middle=nc1.p1_middle, p1_last=nc1.p1_last,
+            p2_first=nc2.p1_first, p2_middle=nc2.p1_middle, p2_last=nc2.p1_last,
+        )
 
-    return _parse_single_to_components(name)
+    if is_raw_caps:
+        return _parse_single_to_components(name)
+    return _parse_single_firstlast_to_components(name)
 
 
 def _parse_ampersand_to_components(parts: List[str]) -> NameComponents:
@@ -1342,10 +1433,42 @@ def combine_household_names(persons: List[str]) -> str:
     if len(persons) == 1:
         return persons[0]
 
-    # Remove "bare prefix" names that are fully subsumed by a richer form.
-    # E.g. "Juan Manuel" is a prefix of "Juan Manuel Ortega", so drop it.
+    # Remove names that are subsumed by a richer variant of the same person.
+    # Two scenarios to detect:
+    #   (a) Bare prefix:   "Juan Manuel" ⊂ "Juan Manuel Ortega"
+    #   (b) Missing middle: "Esther Fields" ⊂ "Esther J. Fields"
     def _norm_tokens(s: str) -> List[str]:
         return [t.rstrip(".").upper() for t in s.split() if t.rstrip(".")]
+
+    def _person_subsumed_by(shorter: List[str], longer: List[str]) -> bool:
+        """Return True if *shorter* is a less-complete variant of the same
+        person as *longer*.
+
+        A person is considered subsumed when they share the same first token
+        and the same last token as a richer variant with extra middle tokens.
+        This dedupes "Esther Fields" into "Esther J. Fields", and also the
+        earlier "Juan Manuel" / "Juan Manuel Ortega" case (where shorter has
+        no surname, it still matches if the first tokens align).
+
+        Suffixes (Jr., Sr., III) are already extracted upstream by
+        ``_extract_suffix``, so two legitimately-different same-named people
+        (father and son) will have been distinguished before reaching here.
+        """
+        if len(shorter) >= len(longer):
+            return False
+        if not shorter or not longer:
+            return False
+        # First token must match.
+        if shorter[0] != longer[0]:
+            return False
+        # Case 1: shorter is a pure prefix of longer (no surname on the
+        # shorter record).  Handles "Juan Manuel" ⊂ "Juan Manuel Ortega".
+        if longer[: len(shorter)] == shorter:
+            return True
+        # Case 2: shorter and longer share first + last token but longer
+        # has an extra middle token.  Handles "Esther Fields" ⊂
+        # "Esther J. Fields".
+        return shorter[-1] == longer[-1]
 
     to_remove: set = set()
     for i, pi in enumerate(persons):
@@ -1353,7 +1476,7 @@ def combine_household_names(persons: List[str]) -> str:
         for j, pj in enumerate(persons):
             if i != j and j not in to_remove:
                 tj = _norm_tokens(pj)
-                if len(ti) < len(tj) and tj[: len(ti)] == ti:
+                if _person_subsumed_by(ti, tj):
                     to_remove.add(i)
                     break
     if to_remove:

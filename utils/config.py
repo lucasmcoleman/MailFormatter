@@ -59,6 +59,86 @@ ORIGINAL_COLUMNS: list[str] = [
 
 
 # =============================================================================
+# State / Province Codes
+# =============================================================================
+
+# 50 US states + DC
+_US_STATES: frozenset[str] = frozenset({
+    'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+    'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+    'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+    'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+    'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY',
+    'DC',
+})
+
+# US territories and freely-associated states (USPS 2-letter codes)
+_US_TERRITORIES: frozenset[str] = frozenset({
+    'AS',  # American Samoa
+    'GU',  # Guam
+    'MP',  # Northern Mariana Islands
+    'PR',  # Puerto Rico
+    'VI',  # US Virgin Islands
+    'FM',  # Federated States of Micronesia
+    'MH',  # Marshall Islands
+    'PW',  # Palau
+})
+
+# Military / diplomatic mail codes used with APO/FPO/DPO addresses
+_MILITARY_STATES: frozenset[str] = frozenset({
+    'AA',  # Americas (except Canada)
+    'AE',  # Europe, Africa, Middle East, Canada
+    'AP',  # Pacific
+})
+
+# Canadian provinces and territories (2-letter codes)
+_CA_PROVINCES: frozenset[str] = frozenset({
+    'AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'NT', 'NU',
+    'ON', 'PE', 'QC', 'SK', 'YT',
+})
+
+# Union of all codes we accept as valid on a mailing label.
+VALID_STATE_CODES: frozenset[str] = (
+    _US_STATES | _US_TERRITORIES | _MILITARY_STATES | _CA_PROVINCES
+)
+
+
+def is_us_state(code: str) -> bool:
+    """Return True if *code* is a US state, DC, or territory (not military or CA)."""
+    return code.strip().upper() in (_US_STATES | _US_TERRITORIES)
+
+
+def is_canadian_province(code: str) -> bool:
+    """Return True if *code* is a Canadian province or territory."""
+    return code.strip().upper() in _CA_PROVINCES
+
+
+def is_military_state(code: str) -> bool:
+    """Return True if *code* is a military/diplomatic APO/FPO/DPO code."""
+    return code.strip().upper() in _MILITARY_STATES
+
+
+def is_valid_state(code: str) -> bool:
+    """Return True if *code* is any recognized state/province/military code."""
+    return code.strip().upper() in VALID_STATE_CODES
+
+
+def normalize_state_code(value: str) -> str:
+    """Normalize a state / province string to a 2-letter code.
+
+    Accepts US states, US territories, military (APO/FPO/DPO) codes, and
+    Canadian provinces.  Returns an empty string if the input is not a
+    recognized code.  Case-insensitive.  Whitespace tolerant.
+    """
+    if not value:
+        return ''
+    s = value.strip().upper()
+    if s in VALID_STATE_CODES:
+        return s
+    return ''
+
+
+# =============================================================================
 # Null / Placeholder Patterns
 # =============================================================================
 
@@ -303,28 +383,49 @@ NAME_PARTICLES: set[str] = {
 # Utility Helpers
 # =============================================================================
 
-def normalize_zip(zip_code: str) -> str:
-    """Normalize a ZIP code to 5 digits.
+_CA_POSTAL_RE = re.compile(r'^([A-Z]\d[A-Z])\s*(\d[A-Z]\d)$', re.IGNORECASE)
 
-    Handles formats like:
+
+def normalize_zip(zip_code: str) -> str:
+    """Normalize a US ZIP code or Canadian postal code.
+
+    US formats (returns 5 digits)::
         "85337-0725" -> "85337"
         "853370725"  -> "85337"
         "85337"      -> "85337"
-        "  85337 "   -> "85337"
+        "  01234 "   -> "01234"       (leading zero preserved)
 
-    Returns an empty string if the input is empty or contains no digits.
+    Canadian formats (returns "A1A 1A1")::
+        "A1A 1A1"    -> "A1A 1A1"
+        "A1A1A1"     -> "A1A 1A1"
+        "a1a1a1"     -> "A1A 1A1"
+
+    Returns an empty string if the input is empty.  Returns whatever
+    digits are present (which may be a short / malformed ZIP) if the
+    input looks US-style but has fewer than 5 digits — validation
+    downstream will flag it.
     """
     cleaned = zip_code.strip()
     if not cleaned:
         return ''
 
-    # Strip everything except digits
+    # Canadian postal code (letter-digit-letter digit-letter-digit)
+    # Detect by the presence of any letter after whitespace stripping.
+    if any(c.isalpha() for c in cleaned):
+        m = _CA_POSTAL_RE.match(cleaned.replace(' ', ''))
+        if m:
+            return f"{m.group(1).upper()} {m.group(2).upper()}"
+        # Has letters but doesn't match Canadian pattern — return as-is
+        # (upper-cased, whitespace normalised) so validation can flag it.
+        return ' '.join(cleaned.upper().split())
+
+    # US-style: extract digits only
     digits = ''.join(c for c in cleaned if c.isdigit())
 
     if len(digits) >= 5:
         return digits[:5]
 
-    # Return whatever digits we have (may be a short/malformed ZIP)
+    # Short/malformed — return what we have so validation can flag it
     return digits
 
 

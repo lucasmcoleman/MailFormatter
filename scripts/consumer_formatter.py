@@ -17,7 +17,7 @@ from typing import Optional
 
 import pandas as pd
 
-from utils.config import OUTPUT_COLUMNS, normalize_zip, normalize_whitespace
+from utils.config import OUTPUT_COLUMNS, normalize_zip, normalize_whitespace, normalize_state_code
 from utils.name_formatter import extract_individuals_from_household
 from utils.address_formatter import format_street_address
 from utils.file_reader import read_input_file
@@ -46,12 +46,10 @@ def _title_case_series(series: pd.Series) -> pd.Series:
 
 
 def _upper_state_series(series: pd.Series) -> pd.Series:
-    """Uppercase a state Series and blank-out anything that isn't exactly 2
-    letters (after stripping)."""
-    def _clean(val: str) -> str:
-        s = val.strip().upper()
-        return s if len(s) == 2 and s.isalpha() else ""
-    return series.astype(str).apply(_clean)
+    """Uppercase a state Series and blank-out anything that is not a
+    recognized US state, US territory, military (APO/FPO/DPO), or
+    Canadian province code."""
+    return series.astype(str).apply(normalize_state_code)
 
 
 # =============================================================================
@@ -124,6 +122,20 @@ def format_consumer_data(input_path: str, output_path: str) -> None:
     city_col = _safe_get_col(df, _CITY_CANDIDATES)
     state_col = _safe_get_col(df, _STATE_CANDIDATES)
     zip_col = _safe_get_col(df, _ZIP_CANDIDATES)
+
+    print(f"  Consumer column mapping ({len(df):,} rows):")
+    for label, col in (
+        ("Name",     name_col),
+        ("First",    first_col),
+        ("Last",     last_col),
+        ("NameLn2",  name_line2_col),
+        ("Address",  addr_col),
+        ("Address2", addr2_col),
+        ("City",     city_col),
+        ("State",    state_col),
+        ("Zip",      zip_col),
+    ):
+        print(f"    {label:<10} -> {col if col else '(none)'}")
 
     # ---- Name ----
     if name_col is not None:

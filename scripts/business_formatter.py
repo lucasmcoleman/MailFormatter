@@ -16,7 +16,7 @@ from typing import Optional
 
 import pandas as pd
 
-from utils.config import OUTPUT_COLUMNS, normalize_zip, normalize_whitespace
+from utils.config import OUTPUT_COLUMNS, normalize_zip, normalize_whitespace, normalize_state_code
 from utils.name_formatter import format_entity_name
 from utils.address_formatter import format_street_address
 from utils.file_reader import read_input_file
@@ -45,12 +45,10 @@ def _title_case_series(series: pd.Series) -> pd.Series:
 
 
 def _upper_state_series(series: pd.Series) -> pd.Series:
-    """Uppercase a state Series and blank-out anything that isn't exactly 2
-    letters (after stripping)."""
-    def _clean(val: str) -> str:
-        s = val.strip().upper()
-        return s if len(s) == 2 and s.isalpha() else ""
-    return series.astype(str).apply(_clean)
+    """Uppercase a state Series and blank-out anything that is not a
+    recognized US state, US territory, military (APO/FPO/DPO), or
+    Canadian province code."""
+    return series.astype(str).apply(normalize_state_code)
 
 
 # =============================================================================
@@ -120,7 +118,22 @@ def format_business_data(input_path: str, output_path: str) -> None:
     state_col = _safe_get_col(df, _STATE_CANDIDATES)
     zip_col = _safe_get_col(df, _ZIP_CANDIDATES)
 
-    # ---- Business name (prefer DBA over Company when DBA is non-empty) ----
+    print(f"  Business column mapping ({len(df):,} rows):")
+    for label, col in (
+        ("Company",  company_col),
+        ("DBA",      dba_col),
+        ("Contact",  contact_col),
+        ("Title",    title_col),
+        ("Address",  addr_col),
+        ("City",     city_col),
+        ("State",    state_col),
+        ("Zip",      zip_col),
+    ):
+        print(f"    {label:<10} -> {col if col else '(none)'}")
+
+    # ---- Business name (prefer Company / legal name over DBA) ----
+    # The legal entity name is preferred over the DBA because legal mailings
+    # need to reach the registered owner of record, not the marketing/trade name.
     def _resolve_name(row_idx: int) -> str:
         dba = ""
         company = ""
@@ -128,7 +141,7 @@ def format_business_data(input_path: str, output_path: str) -> None:
             dba = df.at[row_idx, dba_col].strip()
         if company_col is not None:
             company = df.at[row_idx, company_col].strip()
-        raw = dba if dba else company
+        raw = company if company else dba
         return format_entity_name(raw) if raw else ""
 
     names = pd.Series(
@@ -173,7 +186,7 @@ def format_business_data(input_path: str, output_path: str) -> None:
     def _raw_name(row_idx: int) -> str:
         dba = _to_raw(str(df.at[row_idx, dba_col])) if dba_col is not None else ""
         company = _to_raw(str(df.at[row_idx, company_col])) if company_col is not None else ""
-        return dba if dba else company
+        return company if company else dba
 
     def _raw_title_dept(row_idx: int) -> str:
         contact = _to_raw(str(df.at[row_idx, contact_col])) if contact_col is not None else ""

@@ -448,3 +448,107 @@ class TestClassificationFalsePositives:
         """Words that contain trust-keyword substrings must not match."""
         assert not is_trust("COUNTRY CLUB")
         assert not is_trust("TRUCK ENTERPRISES")
+
+
+# ---------------------------------------------------------------------------
+# Test 15: Title-Case (FIRST LAST) Name Parsing
+# ---------------------------------------------------------------------------
+class TestTitleCaseFirstLastParsing:
+    """Names arriving in title case should be parsed as FIRST [MIDDLE] LAST,
+    not reversed like ALL-CAPS parcel data."""
+
+    def test_simple_two_token(self):
+        """'Esther Fields' should stay as 'Esther Fields', not become 'Fields Esther'."""
+        nc = parse_raw_owner_name("Esther Fields")
+        assert nc.p1_first == "Esther"
+        assert nc.p1_last == "Fields"
+        assert nc.full_name == "Esther Fields"
+
+    def test_with_middle_initial(self):
+        """'Esther J Fields' → first=Esther, middle=J., last=Fields."""
+        nc = parse_raw_owner_name("Esther J Fields")
+        assert nc.p1_first == "Esther"
+        assert nc.p1_middle == "J."
+        assert nc.p1_last == "Fields"
+        assert nc.full_name == "Esther J. Fields"
+
+    def test_with_full_middle_name(self):
+        """'John Michael Smith' → first=John, middle=Michael, last=Smith."""
+        nc = parse_raw_owner_name("John Michael Smith")
+        assert nc.p1_first == "John"
+        assert nc.p1_middle == "Michael"
+        assert nc.p1_last == "Smith"
+
+    def test_compound_last_name_with_particle(self):
+        """'Ramon de la Cruz' → first=Ramon, last=de la Cruz."""
+        nc = parse_raw_owner_name("Ramon de la Cruz")
+        assert nc.p1_first == "Ramon"
+        assert "Cruz" in nc.p1_last
+
+    def test_allcaps_still_uses_last_first(self):
+        """ALL-CAPS input must still use LAST FIRST order (existing behavior)."""
+        nc = parse_raw_owner_name("FIELDS ESTHER J")
+        assert nc.p1_first == "Esther"
+        assert nc.p1_last == "Fields"
+
+    def test_title_case_with_suffix(self):
+        """'John Smith Jr' → first=John, last=Smith, suffix preserved."""
+        nc = parse_raw_owner_name("John Smith Jr")
+        assert nc.p1_first == "John"
+        assert nc.p1_last == "Smith"
+        assert "Jr" in nc.full_name
+
+    def test_title_case_trust_still_detected(self):
+        """Title-case trusts should still be classified correctly."""
+        nc = parse_raw_owner_name("Smith Family Trust")
+        assert nc.is_business
+        assert "Trust" in nc.full_name
+
+    def test_title_case_entity_still_detected(self):
+        """Title-case entities should still be classified correctly."""
+        nc = parse_raw_owner_name("Acme Holdings LLC")
+        assert nc.is_business
+        assert "LLC" in nc.full_name
+
+
+# ---------------------------------------------------------------------------
+# Test 16: Household Subsumption (Middle Initial Variants)
+# ---------------------------------------------------------------------------
+class TestHouseholdSubsumption:
+    """Same person with and without middle initial must be deduped."""
+
+    def test_esther_fields_with_and_without_middle(self):
+        """'Esther Fields' + 'Esther J. Fields' → 'Esther J. Fields'."""
+        from utils.name_formatter import combine_household_names
+        result = combine_household_names(["Esther Fields", "Esther J. Fields"])
+        assert result == "Esther J. Fields"
+
+    def test_order_does_not_matter(self):
+        """Subsumption works regardless of input order."""
+        from utils.name_formatter import combine_household_names
+        assert combine_household_names(
+            ["Esther J. Fields", "Esther Fields"]
+        ) == "Esther J. Fields"
+
+    def test_juan_manuel_ortega_still_works(self):
+        """Preserve previous session fix: 'Juan Manuel' ⊂ 'Juan Manuel Ortega'."""
+        from utils.name_formatter import combine_household_names
+        result = combine_household_names(
+            ["Juan Manuel", "Ofelia Ortega", "Juan Manuel Ortega"]
+        )
+        assert result == "Ofelia & Juan Manuel Ortega"
+
+    def test_different_first_names_not_merged(self):
+        """Different people at same address must not merge."""
+        from utils.name_formatter import combine_household_names
+        assert combine_household_names(
+            ["John Smith", "Jane Smith"]
+        ) == "John & Jane Smith"
+
+    def test_subsumption_with_third_person(self):
+        """Subsumption works when a third unrelated person is in the group."""
+        from utils.name_formatter import combine_household_names
+        result = combine_household_names(
+            ["Esther Fields", "Esther J. Fields", "Bob Fields"]
+        )
+        assert result == "Esther J. & Bob Fields"

@@ -552,3 +552,98 @@ class TestHouseholdSubsumption:
             ["Esther Fields", "Esther J. Fields", "Bob Fields"]
         )
         assert result == "Esther J. & Bob Fields"
+
+
+# ---------------------------------------------------------------------------
+# Test 17: PO Box Safety — False Positive Protection
+# ---------------------------------------------------------------------------
+class TestPOBoxFalsePositives:
+    """Ensure 'BOX <n>' as a substring inside a word does NOT trigger PO Box
+    detection.  A false positive here causes distinct addresses to merge."""
+
+    def test_lock_box_is_not_po_box(self):
+        from utils.address_formatter import is_po_box, extract_po_box
+        assert not is_po_box("LOCK BOX 100 MAIN ST")
+        assert extract_po_box("LOCK BOX 100 MAIN ST") is None
+
+    def test_mailbox_is_not_po_box(self):
+        from utils.address_formatter import is_po_box, extract_po_box
+        assert not is_po_box("MAILBOX 100")
+        assert extract_po_box("MAILBOX 100") is None
+
+    def test_drop_box_is_not_po_box(self):
+        from utils.address_formatter import is_po_box, extract_po_box
+        assert not is_po_box("DROP BOX 100")
+        assert extract_po_box("DROP BOX 100") is None
+
+    def test_bare_box_is_not_po_box(self):
+        """'BOX 100 MAIN ST' with no 'PO' prefix is too ambiguous to trust."""
+        from utils.address_formatter import is_po_box, extract_po_box
+        assert not is_po_box("BOX 100 MAIN ST")
+        assert extract_po_box("BOX 100 MAIN ST") is None
+
+    def test_genuine_po_boxes_still_detected(self):
+        from utils.address_formatter import is_po_box, extract_po_box
+        assert is_po_box("PO BOX 100")
+        assert extract_po_box("PO BOX 100") == "PO BOX 100"
+        assert is_po_box("P.O. BOX 100")
+        assert extract_po_box("P.O. BOX 100") == "PO BOX 100"
+        assert is_po_box("POBOX100")  # no separator
+        assert extract_po_box("POBOX100") == "PO BOX 100"
+        assert is_po_box("POB 99")
+        assert extract_po_box("POB 99") == "PO BOX 99"
+        assert is_po_box("1701 E Pima St PO Box 571")
+        assert extract_po_box("1701 E Pima St PO Box 571") == "PO BOX 571"
+
+
+# ---------------------------------------------------------------------------
+# Test 18: Address ' - ' Separator Preservation
+# ---------------------------------------------------------------------------
+class TestAddressDashPreservation:
+    """Regression: the ' - ' separator in addresses must not be stripped as
+    if it were a null marker.  Only ' - NULL', ' - N/A', ' - NONE' count."""
+
+    def test_dash_building_preserved(self):
+        from utils.address_formatter import format_street_address
+        result = format_street_address("123 Main St - Building A")
+        assert "Building A" in result or "-" in result or "Bldg" in result
+
+    def test_dash_null_stripped(self):
+        from utils.address_formatter import format_street_address
+        result = format_street_address("123 Main St - NULL")
+        assert "NULL" not in result.upper()
+
+
+# ---------------------------------------------------------------------------
+# Test 19: CSV Encoding — Non-ASCII Names
+# ---------------------------------------------------------------------------
+class TestCsvEncodingTolerance:
+    """The CSV reader must handle UTF-8, cp1252, and latin-1 without crashing
+    or corrupting accented names."""
+
+    def test_reads_utf8_accented_names(self, tmp_path):
+        from utils.file_reader import _read_csv
+        csv = tmp_path / "utf8.csv"
+        csv.write_text(
+            "Name,City\nJosé García,Phoenix\nMüller,Sedona\n",
+            encoding="utf-8",
+        )
+        df = _read_csv(str(csv))
+        assert "José García" in df["Name"].tolist()
+        assert "Müller" in df["Name"].tolist()
+
+    def test_reads_utf8_sig_with_bom(self, tmp_path):
+        from utils.file_reader import _read_csv
+        csv = tmp_path / "utf8sig.csv"
+        csv.write_text("Name\nJosé\n", encoding="utf-8-sig")
+        df = _read_csv(str(csv))
+        assert list(df.columns) == ["Name"]  # BOM must not contaminate column
+        assert "José" in df["Name"].tolist()
+
+    def test_reads_cp1252_fallback(self, tmp_path):
+        from utils.file_reader import _read_csv
+        csv = tmp_path / "cp1252.csv"
+        csv.write_bytes("Name\nJos\xe9\n".encode("cp1252"))
+        df = _read_csv(str(csv))
+        # Either UTF-8 would fail and cp1252 would match, producing "José"
+        assert len(df) == 1

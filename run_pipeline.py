@@ -113,7 +113,7 @@ def run_pipeline(
     print(f"\n  [1a] Formatting Consumer: {consumer_input}")
     try:
         format_consumer_data(consumer_input, consumer_output)
-        consumer_count = len(pd.read_csv(consumer_output, dtype=str, keep_default_na=False))
+        consumer_count = len(pd.read_csv(consumer_output, dtype=str, keep_default_na=False, encoding="utf-8-sig"))
         print(f"       -> {consumer_count:,} records  ({_fmt_elapsed(time.time() - stage_start)})")
     except Exception as exc:
         print(f"       ERROR: {exc}")
@@ -124,7 +124,7 @@ def run_pipeline(
     print(f"\n  [1b] Formatting Business: {business_input}")
     try:
         format_business_data(business_input, business_output)
-        business_count = len(pd.read_csv(business_output, dtype=str, keep_default_na=False))
+        business_count = len(pd.read_csv(business_output, dtype=str, keep_default_na=False, encoding="utf-8-sig"))
         print(f"       -> {business_count:,} records  ({_fmt_elapsed(time.time() - stage_start)})")
     except Exception as exc:
         print(f"       ERROR: {exc}")
@@ -135,7 +135,7 @@ def run_pipeline(
     print(f"\n  [1c] Formatting Parcel: {parcel_input}")
     try:
         format_parcel_data(parcel_input, parcel_output)
-        parcel_count = len(pd.read_csv(parcel_output, dtype=str, keep_default_na=False))
+        parcel_count = len(pd.read_csv(parcel_output, dtype=str, keep_default_na=False, encoding="utf-8-sig"))
         print(f"       -> {parcel_count:,} records  ({_fmt_elapsed(time.time() - stage_start)})")
     except Exception as exc:
         print(f"       ERROR: {exc}")
@@ -168,14 +168,14 @@ def run_pipeline(
         if not os.path.isfile(path):
             print(f"  WARNING: {path} was not produced — creating empty stub.")
             stub = pd.DataFrame(columns=OUTPUT_COLUMNS)
-            stub.to_csv(path, index=False)
+            stub.to_csv(path, index=False, encoding="utf-8-sig")
         else:
-            row_count = len(pd.read_csv(path, dtype=str, keep_default_na=False))
+            row_count = len(pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig"))
             if row_count == 0:
                 print(f"  WARNING: {path} contains 0 rows — source data may be missing or the formatter failed.")
 
     combine_sources(consumer_output, business_output, parcel_output, combined_output)
-    combined_count = len(pd.read_csv(combined_output, dtype=str, keep_default_na=False))
+    combined_count = len(pd.read_csv(combined_output, dtype=str, keep_default_na=False, encoding="utf-8-sig"))
     print(f"  Stage 2 elapsed: {_fmt_elapsed(time.time() - stage_start)}")
 
     # =====================================================================

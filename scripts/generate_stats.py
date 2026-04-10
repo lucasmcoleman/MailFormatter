@@ -30,7 +30,7 @@ def _count_csv(path: str) -> int:
     """Return the number of data rows in a CSV (0 if file does not exist)."""
     if not os.path.isfile(path):
         return 0
-    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
     return len(df)
 
 
@@ -171,7 +171,7 @@ def generate_statistics(
     # ---- Source coverage (from consolidated file) ----
     source_counts: Dict[str, int] = {}
     if os.path.isfile(consolidated_path):
-        cons_df = pd.read_csv(consolidated_path, dtype=str, keep_default_na=False)
+        cons_df = pd.read_csv(consolidated_path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
         source_counts = _source_breakdown(cons_df)
     else:
         cons_df = pd.DataFrame(columns=OUTPUT_COLUMNS)

@@ -147,6 +147,11 @@ class NameComponents:
 
     For businesses, trusts, and government entities only ``full_name`` and
     ``is_business`` are populated; all person-name fields are left empty.
+
+    ``is_life_estate`` is True when the raw name carried a "LE" / "LIFE EST"
+    / "LIFE ESTATE" marker.  Life estate owners are typically deceased or
+    have relinquished fee ownership; the mail must reach the estate, so the
+    record needs human review before going out.
     """
 
     full_name: str = ""
@@ -157,6 +162,7 @@ class NameComponents:
     p2_middle: str = ""
     p2_last: str = ""
     is_business: bool = False
+    is_life_estate: bool = False
 
 
 # ── internal helpers ────────────────────────────────────────────────────
@@ -258,6 +264,32 @@ def _strip_transactional_suffixes(name: str) -> str:
     if not name:
         return ""
     return normalize_whitespace(_TRANSACTIONAL_SUFFIX_RE.sub("", name))
+
+
+# Life estate markers — trailing "LE" / "LIFE EST" / "LIFE ESTATE" on an
+# owner name indicates the person holds a life estate interest (typically
+# deceased by the time mail is sent).  We strip the marker from the working
+# name, then re-append "Life Estate" to the formatted output so the end
+# user sees the status clearly.
+_LIFE_ESTATE_RE = re.compile(
+    r"\b(?:LIFE\s+ESTATE|LIFE\s+EST\.?|L\.?\s*E\.?)\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _extract_life_estate(name: str) -> Tuple[str, bool]:
+    """Return ``(name_without_marker, is_life_estate)``.
+
+    Strips a trailing Life Estate marker from *name* if present.  The
+    caller is responsible for re-appending "Life Estate" to the formatted
+    output and flagging the record for review.
+    """
+    if not name:
+        return "", False
+    stripped = _LIFE_ESTATE_RE.sub("", name).strip().rstrip(",").strip()
+    if stripped != name.strip().rstrip(",").strip():
+        return stripped, True
+    return name, False
 
 
 def _normalize_lp(name: str) -> str:
@@ -1183,6 +1215,12 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
     if is_entity(name):
         return NameComponents(full_name=format_entity_name(name), is_business=True)
 
+    # Life estate marker — strip before parsing, re-append on output.
+    name, had_life_estate = _extract_life_estate(name)
+    if not name:
+        # Input was literally just "LE" or similar — nothing to parse.
+        return NameComponents(full_name="Life Estate", is_life_estate=True)
+
     # Detect whether the input is raw ALL-CAPS parcel data (LAST FIRST order)
     # or pre-formatted title-case data (FIRST LAST order).  Mixed/title-case
     # names use the FIRST-LAST parser to avoid reversing an already-correct
@@ -1191,6 +1229,15 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
 
     protected = re.sub(r"\bC/O\b", "C__SLASH__O", name, flags=re.IGNORECASE)
     protected = re.sub(r"\bA/C\b", "A__SLASH__C", protected, flags=re.IGNORECASE)
+
+    # Helper: tag the final NameComponents with the life-estate marker
+    # (sets flag and appends "Life Estate" to the formatted name).
+    def _tag_le(nc: NameComponents) -> NameComponents:
+        if had_life_estate:
+            nc.is_life_estate = True
+            if nc.full_name and "Life Estate" not in nc.full_name:
+                nc.full_name = f"{nc.full_name} Life Estate"
+        return nc
 
     if "/" in protected or "\\" in protected:
         parts = re.split(r"[/\\]", protected)
@@ -1201,7 +1248,7 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
         ]
         if len(parts) >= 2:
             if is_raw_caps:
-                return _parse_slash_to_components(parts)
+                return _tag_le(_parse_slash_to_components(parts))
             # Title-case slash: parse each part independently in FIRST LAST order.
             nc1 = _parse_single_firstlast_to_components(parts[0])
             if len(parts) == 2:
@@ -1209,12 +1256,12 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
                 combined = combine_household_names(
                     [n for n in [nc1.full_name, nc2.full_name] if n]
                 )
-                return NameComponents(
+                return _tag_le(NameComponents(
                     full_name=combined,
                     p1_first=nc1.p1_first, p1_middle=nc1.p1_middle, p1_last=nc1.p1_last,
                     p2_first=nc2.p1_first, p2_middle=nc2.p1_middle, p2_last=nc2.p1_last,
-                )
-            return nc1
+                ))
+            return _tag_le(nc1)
         if parts:
             name = parts[0]
 
@@ -1224,7 +1271,7 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
     amp_parts = re.split(r'\s+&\s+|\s+AND\s+', name, flags=re.IGNORECASE)
     if len(amp_parts) >= 2:
         if is_raw_caps:
-            return _parse_ampersand_to_components(amp_parts)
+            return _tag_le(_parse_ampersand_to_components(amp_parts))
         # Title-case ampersand: parse each part in FIRST LAST order.
         parsed = [_parse_single_firstlast_to_components(p.strip()) for p in amp_parts]
         combined = combine_household_names(
@@ -1232,15 +1279,15 @@ def parse_raw_owner_name(raw: str) -> NameComponents:
         )
         nc1 = parsed[0]
         nc2 = parsed[1] if len(parsed) > 1 else NameComponents()
-        return NameComponents(
+        return _tag_le(NameComponents(
             full_name=combined,
             p1_first=nc1.p1_first, p1_middle=nc1.p1_middle, p1_last=nc1.p1_last,
             p2_first=nc2.p1_first, p2_middle=nc2.p1_middle, p2_last=nc2.p1_last,
-        )
+        ))
 
     if is_raw_caps:
-        return _parse_single_to_components(name)
-    return _parse_single_firstlast_to_components(name)
+        return _tag_le(_parse_single_to_components(name))
+    return _tag_le(_parse_single_firstlast_to_components(name))
 
 
 def _parse_ampersand_to_components(parts: List[str]) -> NameComponents:

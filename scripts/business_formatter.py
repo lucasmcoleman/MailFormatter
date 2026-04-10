@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from typing import Optional
 
 import pandas as pd
@@ -130,6 +131,31 @@ def format_business_data(input_path: str, output_path: str) -> None:
         ("Zip",      zip_col),
     ):
         print(f"    {label:<10} -> {col if col else '(none)'}")
+
+    # ---- Sanity check: company column should not contain street addresses ----
+    # Data Axle Business files use "Address Line 1" for the company name
+    # (weird but documented).  If someone accidentally feeds Consumer-style
+    # data through this formatter, "Address Line 1" will be mapped to the
+    # company column but actually contain street addresses.  Detect this by
+    # sampling the first few non-empty company values and checking whether
+    # they look like street addresses (start with a number + word).
+    if company_col is not None:
+        sample_vals = [
+            v for v in df[company_col].astype(str).head(20).tolist()
+            if v and v.strip()
+        ]
+        street_like = sum(
+            1 for v in sample_vals
+            if re.match(r'^\s*\d+\s+\S', v)
+        )
+        if sample_vals and street_like >= max(3, len(sample_vals) // 2):
+            print()
+            print("  WARNING: The Company column appears to contain street")
+            print(f"    addresses ({street_like}/{len(sample_vals)} sampled rows")
+            print("    start with a house number).  If this is Consumer data,")
+            print("    run it through consumer_formatter instead.  Continuing")
+            print("    anyway, but the output will likely be garbage.")
+            print()
 
     # ---- Business name (prefer Company / legal name over DBA) ----
     # The legal entity name is preferred over the DBA because legal mailings

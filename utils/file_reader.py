@@ -10,6 +10,12 @@ from typing import Optional
 import pandas as pd
 
 
+# Encodings to try when reading CSVs, in order.  utf-8-sig handles files
+# with or without a byte-order mark, cp1252 is the standard Windows/Excel
+# encoding, and latin-1 is a byte-for-byte fallback that never fails.
+_CSV_ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
+
+
 def _safe_get_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
     """Return the first column name from *candidates* that exists in *df*
     (case-insensitive).  Returns ``None`` if no match is found."""
@@ -49,8 +55,26 @@ def _read_xlsx(path: str) -> pd.DataFrame:
 
 
 def _read_csv(path: str) -> pd.DataFrame:
-    """Read a CSV file directly."""
-    return pd.read_csv(path, dtype=str, keep_default_na=False)
+    """Read a CSV file, trying common encodings until one succeeds.
+
+    Order: ``utf-8-sig`` (handles UTF-8 with or without BOM), then
+    ``cp1252`` (Windows/Excel default), then ``latin-1`` (byte-for-byte
+    fallback that never raises).  On Windows pandas defaults to the
+    system locale, which is often ``cp1252`` — without this loop, UTF-8
+    files with accented characters (José, Müller, Zoë) would crash or
+    silently corrupt.
+    """
+    last_err: Optional[Exception] = None
+    for enc in _CSV_ENCODINGS:
+        try:
+            return pd.read_csv(path, dtype=str, keep_default_na=False, encoding=enc)
+        except UnicodeDecodeError as exc:
+            last_err = exc
+            continue
+    # latin-1 should always succeed; if we're here something else went wrong.
+    raise RuntimeError(
+        f"Failed to read {path} with any known encoding. Last error: {last_err}"
+    )
 
 
 def read_input_file(path: str) -> pd.DataFrame:

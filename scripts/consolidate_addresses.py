@@ -649,7 +649,7 @@ def consolidate_addresses(
         Statistics: ``input_records``, ``output_records``,
         ``consolidation_rate``, ``records_consolidated``, ``cost_savings``.
     """
-    df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
+    df = pd.read_csv(input_path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
     input_count = len(df)
     print(f"  Input records: {input_count:,}")
 
@@ -740,7 +740,7 @@ def consolidate_addresses(
 
     # ---- Write ----
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    result_df.to_csv(output_path, index=False)
+    result_df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
     # ---- Compute statistics ----
     records_consolidated = input_count - output_count

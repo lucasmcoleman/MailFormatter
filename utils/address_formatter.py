@@ -54,12 +54,18 @@ _ZIP4_FRAGMENT_RE = re.compile(r'\b\d{5}[-\s]?\d{4}\b')
 # For extracting the PO Box number/code specifically.
 # Matches numeric PO Boxes (BOX 571) and letter-coded ones (BOX Z, BOX AB).
 # Also handles "BOX DRAWER 9" → captures "9" (the number after DRAWER).
+#
+# SAFETY: Every alternative requires a word boundary (\b) so we never match
+# "BOX" as a substring inside "MAILBOX", "LOCK BOX", "DROP BOX", etc. The
+# bare "BOX" alternative is intentionally omitted here — a standalone "Box"
+# without any "PO"/"POB" prefix is too ambiguous to trust in owner-supplied
+# addresses (could be locker, safe-deposit, intake-box, etc.).
 _PO_BOX_DRAWER_RE = re.compile(
-    r'(?:P\.?\s*O\.?\s*BOX|POBOX|POB|BOX)\s+DRAWER\s+([A-Z0-9][A-Z0-9\-]*)',
+    r'\b(?:P\.?\s*O\.?\s*BOX\b|POBOX|POB\b)\s*DRAWER\s+([A-Z0-9][A-Z0-9\-]*)',
     flags=re.IGNORECASE,
 )
 _PO_BOX_NUMBER_RE = re.compile(
-    r'(?:P\.?\s*O\.?\s*BOX|POBOX|POB|BOX)\s+([A-Z0-9][A-Z0-9\-]*)',
+    r'\b(?:P\.?\s*O\.?\s*BOX\b|POBOX|POB\b)\s*([A-Z0-9][A-Z0-9\-]*)',
     flags=re.IGNORECASE,
 )
 

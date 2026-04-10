@@ -226,7 +226,7 @@ def format_business_data(input_path: str, output_path: str) -> None:
 
     # Ensure output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    out.to_csv(output_path, index=False)
+    out.to_csv(output_path, index=False, encoding="utf-8-sig")
 
 
 # =============================================================================

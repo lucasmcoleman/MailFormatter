@@ -275,7 +275,7 @@ def validate_consolidated_output(
         All issues found.  Errors begin with ``"ERROR:"``, warnings with
         ``"WARNING:"``.
     """
-    df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
+    df = pd.read_csv(input_path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
     print(f"  Validating {len(df):,} records from {input_path}")
 
     all_issues: List[str] = []
@@ -314,7 +314,7 @@ def validate_consolidated_output(
             df.at[idx, "Review_Reason"] = (
                 f"{existing}; {reason}" if existing else reason
             )
-        df.to_csv(input_path, index=False)
+        df.to_csv(input_path, index=False, encoding="utf-8-sig")
 
     # --- Summary ---
     errors = [i for i in all_issues if i.startswith("ERROR:")]

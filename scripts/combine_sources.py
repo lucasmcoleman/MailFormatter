@@ -55,7 +55,7 @@ def combine_sources(
         ("Business", business_path),
         ("Parcel", parcel_path),
     ]:
-        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+        df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
 
         # Validate required columns
         missing = [c for c in OUTPUT_COLUMNS if c not in df.columns]
@@ -86,7 +86,7 @@ def combine_sources(
 
     # Write output
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    combined.to_csv(output_path, index=False)
+    combined.to_csv(output_path, index=False, encoding="utf-8-sig")
     print(f"  Written to {output_path}")
 
 

@@ -62,8 +62,11 @@ ORIGINAL_COLUMNS: list[str] = [
 # Null / Placeholder Patterns
 # =============================================================================
 
+# Inline null-marker patterns stripped from address strings.
+# Every entry must contain an actual null keyword (NULL, N/A, NONE); a bare
+# " - " separator is too broad — it would collapse legitimate addresses like
+# "123 Main St - Building A".
 NULL_PATTERNS: list[str] = [
-    ' - ',
     ' - NULL',
     ' - N/A',
     ' - NONE',
@@ -189,11 +192,17 @@ UNIT_DESIGNATORS_MATCHING: dict[str, str] = _UNIT_CANONICAL
 # PO Box Patterns
 # =============================================================================
 
+# SAFETY: Bare "BOX <n>" is intentionally omitted. Matching it causes false
+# positives on "MAILBOX 100", "LOCK BOX 100", "DROP BOX 100" etc. — which the
+# pipeline would then try to merge as PO Box records. If a PO Box is really
+# present, the source data almost always includes "PO" or "P.O." as the
+# prefix, so the stricter patterns below are sufficient in practice.
+# Note: "POBOX100" (no separator) is a common data-entry style, so the
+# POBOX alternative must NOT require a word boundary after the keyword.
 PO_BOX_PATTERNS: list[str] = [
-    r'\bP\.?\s*O\.?\s*BOX\s+[A-Z0-9][A-Z0-9\-]*\b',
-    r'\bPOBOX\s*[A-Z0-9][A-Z0-9\-]*\b',
-    r'\bPOB\s+[A-Z0-9][A-Z0-9\-]*\b',
-    r'\bBOX\s+[A-Z0-9][A-Z0-9\-]*\b',
+    r'\bP\.?\s*O\.?\s*BOX\b\s*[A-Z0-9][A-Z0-9\-]*',
+    r'\bPOBOX\s*[A-Z0-9][A-Z0-9\-]*',
+    r'\bPOB\b\s+[A-Z0-9][A-Z0-9\-]*',
 ]
 
 PO_BOX_REGEX: re.Pattern[str] = re.compile(

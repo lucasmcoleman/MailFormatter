@@ -647,3 +647,158 @@ class TestCsvEncodingTolerance:
         df = _read_csv(str(csv))
         # Either UTF-8 would fail and cp1252 would match, producing "José"
         assert len(df) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 20: State Code Validation (US + Territories + Military + Canada)
+# ---------------------------------------------------------------------------
+class TestStateCodeValidation:
+    def test_us_states(self):
+        from utils.config import is_valid_state, is_us_state
+        assert is_valid_state("AZ")
+        assert is_valid_state("DC")
+        assert is_us_state("AZ")
+
+    def test_territories(self):
+        from utils.config import is_valid_state, is_us_state
+        assert is_valid_state("PR")
+        assert is_valid_state("GU")
+        assert is_us_state("PR")
+
+    def test_military(self):
+        from utils.config import is_valid_state, is_military_state, is_us_state
+        assert is_valid_state("AE")
+        assert is_valid_state("AP")
+        assert is_valid_state("AA")
+        assert is_military_state("AE")
+        assert not is_us_state("AE")  # military is separate from US states
+
+    def test_canadian_provinces(self):
+        from utils.config import is_valid_state, is_canadian_province
+        assert is_valid_state("ON")
+        assert is_valid_state("QC")
+        assert is_valid_state("BC")
+        assert is_canadian_province("ON")
+
+    def test_invalid_codes_rejected(self):
+        from utils.config import is_valid_state, normalize_state_code
+        assert not is_valid_state("ZZ")
+        assert not is_valid_state("XX")
+        assert normalize_state_code("ZZ") == ""
+        assert normalize_state_code("zz") == ""
+        assert normalize_state_code("  AZ  ") == "AZ"
+        assert normalize_state_code("az") == "AZ"
+
+
+# ---------------------------------------------------------------------------
+# Test 21: Canadian Postal Code Handling
+# ---------------------------------------------------------------------------
+class TestCanadianPostalCode:
+    def test_canadian_with_space(self):
+        from utils.config import normalize_zip
+        assert normalize_zip("M5V 3A8") == "M5V 3A8"
+
+    def test_canadian_without_space(self):
+        from utils.config import normalize_zip
+        assert normalize_zip("M5V3A8") == "M5V 3A8"
+
+    def test_canadian_lowercase(self):
+        from utils.config import normalize_zip
+        assert normalize_zip("m5v3a8") == "M5V 3A8"
+
+    def test_us_zip_still_normalizes(self):
+        from utils.config import normalize_zip
+        assert normalize_zip("85337-0725") == "85337"
+        assert normalize_zip("01234") == "01234"  # leading zero preserved
+        assert normalize_zip("01234-5678") == "01234"
+
+    def test_short_zip_returns_what_it_has(self):
+        """Short ZIP returned as-is so validation can flag it."""
+        from utils.config import normalize_zip
+        assert normalize_zip("1234") == "1234"
+
+
+# ---------------------------------------------------------------------------
+# Test 22: Rural Route / Highway Contract / Military Addresses
+# ---------------------------------------------------------------------------
+class TestRuralAndMilitaryAddresses:
+    def test_rural_route_variants(self):
+        from utils.address_formatter import extract_rural_route
+        assert extract_rural_route("RR 1 BOX 50") == "RR 1 BOX 50"
+        assert extract_rural_route("Rural Route 1, Box 50") == "RR 1 BOX 50"
+        assert extract_rural_route("R.R. 2 Box 10A") == "RR 2 BOX 10A"
+
+    def test_highway_contract_variants(self):
+        from utils.address_formatter import extract_rural_route
+        assert extract_rural_route("HC 2 BOX 10") == "HC 2 BOX 10"
+        assert extract_rural_route("HCR 2 Box 10") == "HC 2 BOX 10"
+        assert extract_rural_route("Highway Contract 2 Box 10") == "HC 2 BOX 10"
+
+    def test_rural_route_is_not_po_box(self):
+        from utils.address_formatter import is_po_box, extract_po_box
+        assert not is_po_box("RR 1 BOX 50")
+        assert extract_po_box("RR 1 BOX 50") is None
+        assert not is_po_box("HC 2 BOX 10")
+
+    def test_rural_route_normalized_for_matching(self):
+        from utils.address_formatter import normalize_address_for_matching
+        # Different spellings of the same destination must produce the
+        # same canonical form so they dedupe.
+        assert (
+            normalize_address_for_matching("RR 1 Box 50")
+            == normalize_address_for_matching("Rural Route 1 Box 50")
+            == normalize_address_for_matching("R.R. 1, Box 50")
+            == "RR 1 BOX 50"
+        )
+
+    def test_military_psc_unit_cmr(self):
+        from utils.address_formatter import extract_military_box, is_po_box
+        assert extract_military_box("PSC 1234 BOX 5678") == "PSC 1234 BOX 5678"
+        assert extract_military_box("Unit 12345 Box 67") == "UNIT 12345 BOX 67"
+        assert extract_military_box("CMR 401 Box 123") == "CMR 401 BOX 123"
+        # Military is not a PO Box
+        assert not is_po_box("PSC 1234 BOX 5678")
+
+
+# ---------------------------------------------------------------------------
+# Test 23: Company-First Business Name Preference
+# ---------------------------------------------------------------------------
+class TestBusinessCompanyFirst:
+    def test_company_preferred_over_dba(self, tmp_path):
+        """When both Company and DBA exist, the legal Company name wins."""
+        import pandas as pd
+        from scripts.business_formatter import format_business_data
+        # Build a minimal Data-Axle-like input
+        df = pd.DataFrame([{
+            "Company": "Acme Holdings LLC",
+            "DBA": "Acme Widgets",
+            "Address Line 2": "123 Main St",
+            "City": "Phoenix",
+            "State": "AZ",
+            "Zip": "85001",
+        }])
+        input_path = tmp_path / "biz.csv"
+        df.to_csv(input_path, index=False, encoding="utf-8-sig")
+        output_path = tmp_path / "biz_formatted.csv"
+        format_business_data(str(input_path), str(output_path))
+        out = pd.read_csv(output_path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+        assert "Acme Holdings LLC" in out["Full Name or Business Company Name"].iloc[0]
+
+    def test_dba_used_when_company_empty(self, tmp_path):
+        """Fallback: if Company is blank, use DBA."""
+        import pandas as pd
+        from scripts.business_formatter import format_business_data
+        df = pd.DataFrame([{
+            "Company": "",
+            "DBA": "Acme Widgets",
+            "Address Line 2": "123 Main St",
+            "City": "Phoenix",
+            "State": "AZ",
+            "Zip": "85001",
+        }])
+        input_path = tmp_path / "biz.csv"
+        df.to_csv(input_path, index=False, encoding="utf-8-sig")
+        output_path = tmp_path / "biz_formatted.csv"
+        format_business_data(str(input_path), str(output_path))
+        out = pd.read_csv(output_path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+        assert "Widgets" in out["Full Name or Business Company Name"].iloc[0]

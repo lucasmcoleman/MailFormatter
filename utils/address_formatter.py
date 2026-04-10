@@ -69,6 +69,25 @@ _PO_BOX_NUMBER_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Rural Route / Highway Contract pattern.  These are physical addresses on
+# rural delivery routes — they always include "BOX <n>" but are NOT PO Boxes.
+# Examples: "RR 1 BOX 50", "RURAL ROUTE 1 BOX 50", "HC 2 BOX 10",
+#           "HCR 2 BOX 10", "HIGHWAY CONTRACT 2 BOX 10"
+_RURAL_ROUTE_RE = re.compile(
+    r'\b('
+    r'RURAL\s+ROUTE|RR|R\.R\.|'
+    r'HIGHWAY\s+CONTRACT|HCR|HC'
+    r')\s*(\d+)[,\s]+BOX\s+([A-Z0-9][A-Z0-9\-]*)',
+    flags=re.IGNORECASE,
+)
+
+# Military / diplomatic addresses (PSC / UNIT box format).
+# Example: "PSC 1234 BOX 5678", "UNIT 12345 BOX 67"
+_MILITARY_BOX_RE = re.compile(
+    r'\b(PSC|UNIT|CMR)\s+(\d+)\s+BOX\s+([A-Z0-9][A-Z0-9\-]*)',
+    flags=re.IGNORECASE,
+)
+
 # Ordinal suffix pattern for display formatting.
 _ORDINAL_RE = re.compile(
     r'\b(\d+)(ST|ND|RD|TH)\b',
@@ -109,15 +128,24 @@ def extract_po_box(address: str) -> Optional[str]:
     Returns the canonical form ``"PO BOX {number}"`` or ``None`` if no PO Box
     pattern is found.
 
+    Note: Rural Route / Highway Contract / military addresses contain "BOX"
+    but are NOT PO Boxes — this function returns ``None`` for them so they
+    flow through as regular street addresses.
+
     Examples::
 
         "1701 E. Pima St. PO Box 571"  -> "PO BOX 571"
         "P.O. Box 42"                  -> "PO BOX 42"
         "POBOX123"                     -> "PO BOX 123"
         "POB 99"                       -> "PO BOX 99"
-        "Box 7"                        -> "PO BOX 7"
+        "RR 1 BOX 50"                  -> None  (rural route, not a PO Box)
+        "PSC 1234 BOX 5678"            -> None  (military, not a PO Box)
     """
     if not address:
+        return None
+    # Rural-route / highway-contract / military addresses are NOT PO Boxes,
+    # even though they contain "BOX <n>".  Reject them up front.
+    if _RURAL_ROUTE_RE.search(address) or _MILITARY_BOX_RE.search(address):
         return None
     # Try "BOX DRAWER X" first so DRAWER isn't captured as the box code.
     drawer_match = _PO_BOX_DRAWER_RE.search(address)
@@ -127,6 +155,71 @@ def extract_po_box(address: str) -> Optional[str]:
     if match:
         return f"PO BOX {match.group(1).upper()}"
     return None
+
+
+# =========================================================================
+# Rural Route / Military Helpers
+# =========================================================================
+
+def extract_rural_route(address: str) -> Optional[str]:
+    """Extract and normalise a Rural Route / Highway Contract address.
+
+    Returns the canonical form ``"RR {n} BOX {x}"`` or ``"HC {n} BOX {x}"``
+    or ``None`` if the address does not match a rural-route pattern.
+
+    Examples::
+
+        "RR 1 BOX 50"                    -> "RR 1 BOX 50"
+        "Rural Route 1, Box 50"          -> "RR 1 BOX 50"
+        "R.R. 2 Box 10A"                 -> "RR 2 BOX 10A"
+        "HC 2 BOX 10"                    -> "HC 2 BOX 10"
+        "HCR 2 Box 10"                   -> "HC 2 BOX 10"
+        "Highway Contract 2 Box 10"      -> "HC 2 BOX 10"
+        "123 Main St"                    -> None
+    """
+    if not address:
+        return None
+    m = _RURAL_ROUTE_RE.search(address)
+    if not m:
+        return None
+    prefix_raw = m.group(1).upper().replace('.', '').replace(' ', '')
+    if prefix_raw.startswith('RR') or prefix_raw == 'RURALROUTE':
+        prefix = 'RR'
+    else:
+        prefix = 'HC'
+    return f"{prefix} {m.group(2)} BOX {m.group(3).upper()}"
+
+
+def is_rural_route(address: str) -> bool:
+    """Return True if *address* contains a Rural Route or Highway Contract pattern."""
+    if not address:
+        return False
+    return bool(_RURAL_ROUTE_RE.search(address))
+
+
+def extract_military_box(address: str) -> Optional[str]:
+    """Extract and normalise a military / diplomatic address.
+
+    Examples::
+
+        "PSC 1234 BOX 5678"  -> "PSC 1234 BOX 5678"
+        "Unit 12345 Box 67"  -> "UNIT 12345 BOX 67"
+        "CMR 401 Box 123"    -> "CMR 401 BOX 123"
+    """
+    if not address:
+        return None
+    m = _MILITARY_BOX_RE.search(address)
+    if not m:
+        return None
+    prefix = m.group(1).upper()
+    return f"{prefix} {m.group(2)} BOX {m.group(3).upper()}"
+
+
+def is_military_address(address: str) -> bool:
+    """Return True if *address* contains a PSC / UNIT / CMR military pattern."""
+    if not address:
+        return False
+    return bool(_MILITARY_BOX_RE.search(address))
 
 
 # =========================================================================
@@ -191,17 +284,28 @@ def normalize_address_for_matching(address: str) -> str:
 
     Steps:
     1. Uppercase and remove periods.
-    2. If a PO Box is present, return ONLY ``"PO BOX {num}"`` (discard street info).
-    3. Strip embedded ZIP+4 fragments.
-    4. Remove unit/suite tokens.
-    5. Normalise directionals (NORTH -> N, etc.).
-    6. Normalise street types (STREET -> ST, etc.).
-    7. Collapse whitespace.
+    2. If a Rural Route / Highway Contract / military pattern is present,
+       return its canonical form (these are physical destinations and dedupe
+       on the route number + box number).
+    3. If a PO Box is present, return ONLY ``"PO BOX {num}"`` (discard street info).
+    4. Strip embedded ZIP+4 fragments.
+    5. Remove unit/suite tokens.
+    6. Normalise directionals (NORTH -> N, etc.).
+    7. Normalise street types (STREET -> ST, etc.).
+    8. Collapse whitespace.
     """
     if not address:
         return ''
 
     text = address.upper().replace('.', '')
+
+    # --- Rural / military short-circuit (must come before PO Box) ---
+    rr = extract_rural_route(text)
+    if rr:
+        return rr
+    mil = extract_military_box(text)
+    if mil:
+        return mil
 
     # --- PO Box short-circuit ---
     po = extract_po_box(text)
@@ -321,6 +425,14 @@ def format_street_address(address: str) -> str:
     text = text.strip()
     if not text:
         return ''
+
+    # --- Rural Route / Highway Contract / Military ---
+    rr = extract_rural_route(text)
+    if rr:
+        return rr  # "RR 1 BOX 50" / "HC 2 BOX 10"
+    mil = extract_military_box(text)
+    if mil:
+        return mil  # "PSC 1234 BOX 5678"
 
     # --- PO Box ---
     po = extract_po_box(text)

@@ -102,6 +102,35 @@ def run_pipeline(
     os.makedirs("output", exist_ok=True)
 
     # =====================================================================
+    # Pre-flight: verify input files exist
+    # =====================================================================
+    print("Pre-flight: checking input files...")
+    inputs = {
+        "Consumer": consumer_input,
+        "Business": business_input,
+        "Parcel":   parcel_input,
+    }
+    missing: list[str] = []
+    for label, path in inputs.items():
+        if not os.path.isfile(path):
+            print(f"  MISSING: {label} input not found at {path}")
+            missing.append(label)
+        else:
+            print(f"  OK: {label} -> {path}")
+    if len(missing) == len(inputs):
+        print()
+        print("ERROR: No input files found.  Aborting before Stage 1.")
+        raise SystemExit(1)
+    if missing:
+        print()
+        print(
+            f"WARNING: {len(missing)} of {len(inputs)} input file(s) missing "
+            f"({', '.join(missing)}).  Pipeline will continue with the rest, "
+            f"but the output will be incomplete."
+        )
+    print()
+
+    # =====================================================================
     # Stage 1: Format Sources
     # =====================================================================
     print("-" * 70)

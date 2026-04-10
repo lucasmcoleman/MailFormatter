@@ -348,13 +348,32 @@ def fuzzy_match_entity_names(
     # Build the mapping: each raw name -> canonical representative.
     mapping: Dict[str, str] = {}
 
+    # Strip transactional / instructional suffixes (e.g. "DO NOT MAIL",
+    # "RETURN TO SENDER", payment numbers) before measuring length.  Without
+    # this the canonical-by-longest heuristic happily picks the noisy variant.
+    _NOISE_RE = re.compile(
+        r'\b(?:DO\s+NOT\s+MAIL|RETURN\s+TO\s+SENDER|RTS|PMT\s*#?\s*\d+|'
+        r'PAYMENT\s*#?\s*\d+|PERMIT\s+\d+|APN\s*#?\s*[\w\-/]+)\b.*$',
+        flags=re.IGNORECASE,
+    )
+
+    def _clean_for_length(name_: str) -> str:
+        return _NOISE_RE.sub('', name_).strip()
+
     for cluster in cluster_map.values():
-        # Select canonical: most words first, then longest string as tiebreaker.
+        # Select canonical: most words first, then longest string as tiebreaker —
+        # but measured AFTER stripping noise so trailing instructional text
+        # doesn't artificially inflate the score of a bad candidate.
         canonical_raw = max(
             cluster,
-            key=lambda name_: (len(name_.split()), len(name_)),
+            key=lambda name_: (
+                len(_clean_for_length(name_).split()),
+                len(_clean_for_length(name_)),
+            ),
         )
-        canonical = format_entity_name(canonical_raw)
+        # Pass the cleaned form to format_entity_name so the noise doesn't
+        # leak into the output canonical.
+        canonical = format_entity_name(_clean_for_length(canonical_raw))
 
         for name in cluster:
             mapping[name] = canonical

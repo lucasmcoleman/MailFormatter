@@ -573,8 +573,9 @@ def consolidate_group(records: List[Dict[str, str]]) -> Dict[str, str]:
             if not merged:
                 unique_persons.append(person)
 
-        # --- Step 7: cap at 5 ---
-        if len(unique_persons) > 5:
+        # --- Step 7: cap at 5 (flagged for review) ---
+        original_household_count = len(unique_persons)
+        if original_household_count > 5:
             unique_persons = unique_persons[:5]
 
         # --- Step 8: combine ---
@@ -608,6 +609,13 @@ def consolidate_group(records: List[Dict[str, str]]) -> Dict[str, str]:
         "State": str(first.get("State", "")),
         "Zip": str(first.get("Zip", "")),
     }
+
+    # Sentinel field consumed downstream by the review-reason builder.
+    # We don't write this to the output CSV — it's stripped before to_csv.
+    if not is_entity_group and original_household_count > 5:
+        result["_household_cap_warning"] = (
+            f"Household capped at 5 (had {original_household_count})"
+        )
 
     # Aggregate original columns — join unique non-empty values with " | "
     for col in ORIGINAL_COLUMNS:
@@ -669,6 +677,7 @@ def consolidate_addresses(
         sub_groups = _split_group_for_output(recs)
         for sub_group in sub_groups:
             merged = consolidate_group(sub_group)
+            cap_warning = merged.pop("_household_cap_warning", "")
             consolidated_records.append(merged)
 
             # Flag cross-source merges that produced a multi-person household.
@@ -680,10 +689,12 @@ def consolidate_addresses(
             merged_name = str(merged.get("Full Name or Business Company Name", ""))
             is_cross_source = len(sources) > 1
             has_multiple_individuals = "&" in merged_name
+            flag_parts: List[str] = []
             if is_cross_source and has_multiple_individuals:
-                needs_review_flags.append("Cross-source household merge")
-            else:
-                needs_review_flags.append("")
+                flag_parts.append("Cross-source household merge")
+            if cap_warning:
+                flag_parts.append(cap_warning)
+            needs_review_flags.append("; ".join(flag_parts))
 
     # ---- Phase 2: fuzzy match on singletons ----
     print("  Phase 2: Fuzzy matching singletons...")
@@ -697,8 +708,15 @@ def consolidate_addresses(
         is_fuzzy_multi = len(cluster) > 1
         sub_groups = _split_group_for_output(cluster) if is_fuzzy_multi else [cluster]
         for sub_group in sub_groups:
-            consolidated_records.append(consolidate_group(sub_group))
-            needs_review_flags.append("Fuzzy address match" if is_fuzzy_multi else "")
+            merged = consolidate_group(sub_group)
+            cap_warning = merged.pop("_household_cap_warning", "")
+            consolidated_records.append(merged)
+            flag_parts: List[str] = []
+            if is_fuzzy_multi:
+                flag_parts.append("Fuzzy address match")
+            if cap_warning:
+                flag_parts.append(cap_warning)
+            needs_review_flags.append("; ".join(flag_parts))
 
     # ---- Build output DataFrame ----
     result_df = pd.DataFrame(consolidated_records, columns=OUTPUT_COLUMNS + ORIGINAL_COLUMNS)
@@ -735,6 +753,10 @@ def consolidate_addresses(
 
     result_df["Needs_Review"] = ["Yes" if r else "" for r in review_reasons]
     result_df["Review_Reason"] = review_reasons
+
+    capped_count = sum(1 for r in review_reasons if "Household capped" in r)
+    if capped_count:
+        print(f"  Household cap (>5 owners) flagged on {capped_count} record(s)")
 
     output_count = len(result_df)
 

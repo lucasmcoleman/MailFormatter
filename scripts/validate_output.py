@@ -23,7 +23,7 @@ from typing import Dict, List, Set, Tuple
 
 import pandas as pd
 
-from utils.config import OUTPUT_COLUMNS, normalize_zip
+from utils.config import OUTPUT_COLUMNS, normalize_zip, is_valid_state, is_canadian_province
 from utils.address_formatter import (
     create_address_key,
     extract_po_box,
@@ -227,15 +227,45 @@ def validate_data_quality(
     if empty_state:
         issues.append(f"WARNING: {empty_state} record(s) have empty state")
 
-    # Invalid state format (non-empty but not 2 uppercase letters)
+    # Invalid state — must be a known US/territory/military/Canadian code.
     non_empty_states = df["State"].str.strip()
-    invalid_state_mask = (non_empty_states != "") & (~non_empty_states.str.match(r'^[A-Z]{2}$'))
+    invalid_state_mask = (non_empty_states != "") & (
+        ~non_empty_states.apply(is_valid_state)
+    )
     if invalid_state_mask.any():
+        bad = sorted(df.loc[invalid_state_mask, "State"].unique())[:10]
         issues.append(
-            f"WARNING: {invalid_state_mask.sum()} record(s) have invalid state format"
+            f"WARNING: {invalid_state_mask.sum()} record(s) have unrecognized "
+            f"state code (sample: {bad})"
         )
         for idx in df[invalid_state_mask].index:
-            flagged[int(idx)] = "Invalid state format"
+            flagged[int(idx)] = f"Unrecognized state code ({df.at[idx, 'State']})"
+
+    # Short / malformed ZIP — anything that isn't a 5-digit US ZIP or
+    # a Canadian "A1A 1A1" postal code.
+    def _zip_is_valid(row: pd.Series) -> bool:
+        zip_val = str(row.get("Zip", "")).strip()
+        state = str(row.get("State", "")).strip().upper()
+        if not zip_val:
+            return True  # empty ZIP is handled by the empty-field check
+        if is_canadian_province(state):
+            # Canadian postal code: A1A 1A1
+            import re as _re
+            return bool(_re.match(r'^[A-Z]\d[A-Z]\s?\d[A-Z]\d$', zip_val))
+        # US: must be exactly 5 digits
+        return zip_val.isdigit() and len(zip_val) == 5
+
+    bad_zip_mask = df.apply(lambda r: not _zip_is_valid(r), axis=1)
+    if bad_zip_mask.any():
+        bad_zips = sorted(df.loc[bad_zip_mask, "Zip"].unique())[:10]
+        issues.append(
+            f"WARNING: {bad_zip_mask.sum()} record(s) have malformed ZIP "
+            f"(short, missing leading zero, or wrong format) — sample: {bad_zips}"
+        )
+        for idx in df[bad_zip_mask].index:
+            existing = flagged.get(int(idx), "")
+            reason = f"Malformed ZIP ({df.at[idx, 'Zip']})"
+            flagged[int(idx)] = f"{existing}; {reason}" if existing else reason
 
     # "Trust Trust" doubling
     trust_doubled = df[name_col].str.contains(r'\bTrust\s+Trust\b', case=False, na=False)

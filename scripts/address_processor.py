@@ -24,7 +24,7 @@ from typing import Optional
 
 import pandas as pd
 
-from utils.config import OUTPUT_COLUMNS, normalize_zip, normalize_whitespace, NULL_PATTERNS
+from utils.config import OUTPUT_COLUMNS, normalize_zip, normalize_whitespace, NULL_PATTERNS, normalize_state_code
 from utils.file_reader import read_input_file
 from utils.name_formatter import (
     format_entity_name,
@@ -86,12 +86,10 @@ def _title_case_series(series: pd.Series) -> pd.Series:
 
 
 def _upper_state_series(series: pd.Series) -> pd.Series:
-    """Uppercase a state Series and blank-out anything that isn't exactly 2
-    letters (after stripping)."""
-    def _clean(val: str) -> str:
-        s = val.strip().upper()
-        return s if len(s) == 2 and s.isalpha() else ""
-    return series.astype(str).apply(_clean)
+    """Uppercase a state Series and blank-out anything that is not a
+    recognized US state, US territory, military (APO/FPO/DPO), or
+    Canadian province code."""
+    return series.astype(str).apply(normalize_state_code)
 
 
 # =============================================================================
@@ -219,6 +217,20 @@ def format_parcel_data(input_path: str, output_path: str) -> None:
     zip_col = _safe_get_col(df, _ZIP_CANDIDATES)
     combined_csz_col = _safe_get_col(df, _COMBINED_CSZ_CANDIDATES)
     parcel_id_col = _safe_get_col(df, _PARCEL_ID_CANDIDATES)
+
+    print(f"  Parcel column mapping ({len(df):,} rows):")
+    for label, col in (
+        ("Owner",     owner_col),
+        ("NameLn2",   name_line2_col),
+        ("Address",   addr_col),
+        ("Address2",  addr2_col),
+        ("City",      city_col),
+        ("State",     state_col),
+        ("Zip",       zip_col),
+        ("CSZ",       combined_csz_col),
+        ("ParcelID",  parcel_id_col),
+    ):
+        print(f"    {label:<10} -> {col if col else '(none)'}")
 
     # ---- Parse combined City/State/ZIP if individual columns are missing ----
     parsed_city = pd.Series("", index=df.index)

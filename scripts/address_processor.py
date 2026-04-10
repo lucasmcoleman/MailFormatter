@@ -163,17 +163,32 @@ def _is_routing_line(text: str) -> bool:
     return bool(_ROUTING_LINE_RE.match(text.strip()))
 
 
+_PARSE_ERRORS: list[tuple[str, str]] = []
+"""Module-level buffer of (raw_name, error_message) pairs for rows whose
+owner name raised an exception during parsing.  Cleared at the start of
+every ``format_parcel_data`` run."""
+
+
 def _parse_owner_name(raw: str) -> NameComponents:
     """Parse a raw owner name string into NameComponents using V5 logic.
 
     Delegates to ``parse_raw_owner_name`` from name_formatter which handles
     all V5 rules: double first names, suffix repositioning, LP normalisation,
     trust/entity/government detection, and slash-separated households.
+
+    Wraps the parse in a try/except so a single malformed row cannot halt
+    the entire pipeline.  On failure, the raw value is logged to
+    ``_PARSE_ERRORS`` and an empty ``NameComponents`` is returned — the
+    consolidate / validate stages will then flag the row for review.
     """
     name = raw.strip()
     if not name:
         return NameComponents()
-    return parse_raw_owner_name(name)
+    try:
+        return parse_raw_owner_name(name)
+    except Exception as exc:  # noqa: BLE001 — parser must never crash the pipeline
+        _PARSE_ERRORS.append((name, f"{type(exc).__name__}: {exc}"))
+        return NameComponents(full_name=name)  # keep raw so downstream can flag it
 
 
 # =============================================================================
@@ -206,6 +221,9 @@ def format_parcel_data(input_path: str, output_path: str) -> None:
         Destination path for the formatted output CSV.
     """
     df = read_input_file(input_path)
+
+    # Reset the per-run parse-error buffer.
+    _PARSE_ERRORS.clear()
 
     # ---- Resolve columns ----
     owner_col = _safe_get_col(df, _OWNER_CANDIDATES)
@@ -418,6 +436,17 @@ def format_parcel_data(input_path: str, output_path: str) -> None:
     deduped = before - len(out)
     if deduped:
         print(f"  Intra-source duplicates removed: {deduped:,}")
+
+    # Report any per-row parse failures.
+    if _PARSE_ERRORS:
+        print(
+            f"  WARNING: {len(_PARSE_ERRORS)} row(s) failed owner-name parsing "
+            f"and were kept with the raw value for human review."
+        )
+        for raw_name, err in _PARSE_ERRORS[:5]:
+            print(f"    - {raw_name!r}: {err}")
+        if len(_PARSE_ERRORS) > 5:
+            print(f"    ...and {len(_PARSE_ERRORS) - 5} more")
 
     # Ensure output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)

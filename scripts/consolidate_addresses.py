@@ -749,6 +749,8 @@ def consolidate_addresses(
             reasons.append("No owner name (parcel ID used)")
         if _is_undeliverable(addr):
             reasons.append("Undeliverable/returned address")
+        if "Life Estate" in name:
+            reasons.append("Life Estate owner (verify estate contact)")
         review_reasons.append("; ".join(reasons))
 
     result_df["Needs_Review"] = ["Yes" if r else "" for r in review_reasons]

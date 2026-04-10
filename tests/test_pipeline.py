@@ -802,3 +802,125 @@ class TestBusinessCompanyFirst:
         format_business_data(str(input_path), str(output_path))
         out = pd.read_csv(output_path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
         assert "Widgets" in out["Full Name or Business Company Name"].iloc[0]
+
+
+# ---------------------------------------------------------------------------
+# Test 24: Life Estate Detection and Expansion
+# ---------------------------------------------------------------------------
+class TestLifeEstate:
+    def test_le_suffix_expanded(self):
+        nc = parse_raw_owner_name("JONES JANE LE")
+        assert nc.is_life_estate
+        assert nc.full_name == "Jane Jones Life Estate"
+
+    def test_life_est_suffix_expanded(self):
+        nc = parse_raw_owner_name("SMITH JOHN LIFE EST")
+        assert nc.is_life_estate
+        assert "Life Estate" in nc.full_name
+
+    def test_life_estate_suffix_expanded(self):
+        nc = parse_raw_owner_name("BROWN MARY LIFE ESTATE")
+        assert nc.is_life_estate
+        assert "Life Estate" in nc.full_name
+
+    def test_le_dotted_form(self):
+        nc = parse_raw_owner_name("GARCIA LUIS L.E.")
+        assert nc.is_life_estate
+
+    def test_title_case_le(self):
+        nc = parse_raw_owner_name("Jane Jones LE")
+        assert nc.is_life_estate
+        assert nc.full_name == "Jane Jones Life Estate"
+
+    def test_lee_surname_not_triggered(self):
+        """Title-case 'Robert Lee' must NOT be flagged as life estate."""
+        nc = parse_raw_owner_name("Robert Lee")
+        assert not nc.is_life_estate
+        assert nc.full_name == "Robert Lee"
+
+    def test_no_marker_no_flag(self):
+        nc = parse_raw_owner_name("JONES JANE")
+        assert not nc.is_life_estate
+
+    def test_life_estate_flag_triggers_review_reason(self, tmp_path):
+        """When a consolidated row contains 'Life Estate', the validation
+        pipeline flags it via the Review_Reason column."""
+        import pandas as pd
+        from scripts.consolidate_addresses import consolidate_addresses
+        # Create a minimal combined CSV with one life-estate record.
+        combined = tmp_path / "combined.csv"
+        cols = [
+            "Data_Source", "Full Name or Business Company Name",
+            "Title\\Department (2nd line)", "Street Address",
+            "City", "State", "Zip",
+            "Primary First Name", "Primary Middle", "Primary Last Name",
+            "2nd Owner First Name", "2nd Owner Middle", "2nd Owner Last Name",
+            "Owner1_original", "TitleDept_original", "Address1_original",
+            "City_original", "State_original", "Zip_original",
+        ]
+        row = {c: "" for c in cols}
+        row.update({
+            "Data_Source": "Parcel",
+            "Full Name or Business Company Name": "Jane Jones Life Estate",
+            "Street Address": "123 Main St.",
+            "City": "Phoenix",
+            "State": "AZ",
+            "Zip": "85001",
+            "Primary First Name": "Jane",
+            "Primary Last Name": "Jones",
+        })
+        pd.DataFrame([row], columns=cols).to_csv(
+            combined, index=False, encoding="utf-8-sig"
+        )
+        output = tmp_path / "consolidated.csv"
+        consolidate_addresses(str(combined), str(output))
+        out = pd.read_csv(
+            output, dtype=str, keep_default_na=False, encoding="utf-8-sig"
+        )
+        assert "Life Estate" in out["Review_Reason"].iloc[0]
+
+
+# ---------------------------------------------------------------------------
+# Test 25: Per-Row Parse Error Tolerance
+# ---------------------------------------------------------------------------
+class TestPerRowParseSafety:
+    def test_parse_error_does_not_crash_pipeline(self, monkeypatch, tmp_path):
+        """If parse_raw_owner_name raises, the row is kept with raw value
+        and logged, but the pipeline continues."""
+        import pandas as pd
+        from scripts import address_processor
+        from utils.name_formatter import NameComponents
+
+        def _crashing_parser(raw):
+            if "BOOM" in raw:
+                raise ValueError("simulated parser crash")
+            return NameComponents(full_name=raw)
+
+        monkeypatch.setattr(
+            address_processor, "parse_raw_owner_name", _crashing_parser
+        )
+        address_processor._PARSE_ERRORS.clear()
+
+        # Two rows: one normal, one that will crash
+        input_df = pd.DataFrame([
+            {"Owner Name": "Jane Doe",      "Street Address 1": "1 Main St",
+             "City": "Phoenix", "State": "AZ", "Zip": "85001"},
+            {"Owner Name": "BOOM CRASH",    "Street Address 1": "2 Main St",
+             "City": "Phoenix", "State": "AZ", "Zip": "85001"},
+        ])
+        input_path = tmp_path / "parcel.csv"
+        input_df.to_csv(input_path, index=False, encoding="utf-8-sig")
+        output_path = tmp_path / "parcel_formatted.csv"
+
+        # Must not raise
+        address_processor.format_parcel_data(str(input_path), str(output_path))
+
+        # The crash row should have been recorded
+        assert len(address_processor._PARSE_ERRORS) == 1
+        assert "BOOM CRASH" in address_processor._PARSE_ERRORS[0][0]
+
+        # Output file exists and has both rows
+        out = pd.read_csv(
+            output_path, dtype=str, keep_default_na=False, encoding="utf-8-sig"
+        )
+        assert len(out) == 2

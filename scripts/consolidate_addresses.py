@@ -60,7 +60,22 @@ _PENDING_RE = re.compile(
 )
 
 _UNDELIVERABLE_RE = re.compile(
-    r'^\s*(?:mail\s+return|undeliverable|returned\s+mail|bad\s+address|no\s+address)\s*$',
+    r'^\s*(?:'
+    r'mail\s+return(?:ed)?'
+    r'|return(?:ed)?\s+(?:mail|to\s+sender)'
+    r'|undeliverable'
+    r'|bad\s+address'
+    r'|no\s+(?:valid\s+)?address'
+    r'|no\s+forwarding\s+address'
+    r'|unable\s+to\s+(?:forward|deliver)'
+    r'|attempted\s+not\s+known'
+    r'|(?:address\s+)?unknown'
+    r'|vacant'
+    r'|deceased'
+    r'|moved'
+    r'|refused'
+    r'|unclaimed'
+    r')\s*$',
     flags=re.IGNORECASE,
 )
 
@@ -207,7 +222,10 @@ def fuzzy_match_addresses(
     for rec in unmatched:
         name = str(rec.get("Full Name or Business Company Name", "")).strip()
         street = str(rec.get("Street Address", "")).strip()
-        if _is_null_like(name) or _is_null_like(street):
+        # Records with null-like or undeliverable addresses must never enter
+        # fuzzy matching — they'd all merge into one mega-record because
+        # "MAIL RETURN" vs "MAIL RETURN" has a ratio of 1.0.
+        if _is_null_like(name) or _is_null_like(street) or _is_undeliverable(street):
             singletons.append([rec])
         else:
             filtered.append(rec)
